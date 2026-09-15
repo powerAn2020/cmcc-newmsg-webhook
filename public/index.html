@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <title>新消息控制台</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <main id="login-view" class="login-layout">
+      <section class="login-intro" aria-labelledby="product-name">
+        <p class="eyebrow">CMCC NEW MESSAGE</p>
+        <h1 id="product-name">新消息<br />控制台</h1>
+        <p>管理上游通道、接口鉴权与投递记录。</p>
+      </section>
+      <section class="login-panel" aria-label="管理员登录">
+        <form id="login-form" novalidate>
+          <div class="form-heading">
+            <p class="eyebrow">ADMIN ACCESS</p>
+            <h2>登录管理台</h2>
+          </div>
+          <label>用户名 <span class="required">*</span><input name="username" autocomplete="username" required /></label>
+          <label>密码 <span class="required">*</span><input name="password" type="password" autocomplete="current-password" required /></label>
+          <p id="login-error" class="form-message" role="alert"></p>
+          <button class="button primary" type="submit">登录</button>
+        </form>
+      </section>
+    </main>
+
+    <main id="app-view" class="app-shell" hidden>
+      <aside class="sidebar">
+        <div class="brand"><span class="brand-mark">M</span><span>新消息控制台</span></div>
+        <nav aria-label="管理导航">
+          <button class="nav-item active" data-view="overview">概览</button>
+          <button class="nav-item" data-view="upstreams">上游通道</button>
+          <button class="nav-item" data-view="credentials">接口鉴权</button>
+          <button class="nav-item" data-view="manual">手动推送</button>
+          <button class="nav-item" data-view="history">发送记录</button>
+        </nav>
+        <div class="sidebar-footer"><span id="operator-name"></span><button id="logout-button" class="text-button" type="button">退出登录</button></div>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar"><div><p class="eyebrow">DELIVERY CONTROL</p><h2 id="page-title">概览</h2></div><div class="service-state"><span></span>服务在线</div></header>
+
+        <section id="overview" class="view active" aria-labelledby="page-title">
+          <div class="stats" aria-label="服务统计">
+            <article><p>已验证上游</p><strong id="upstream-count">0</strong><small>API Key 通道</small></article>
+            <article><p>接口凭据</p><strong id="credential-count">0</strong><small>Gotify 与 Webhook</small></article>
+            <article><p>成功投递</p><strong id="success-count">0</strong><small>当前记录窗口</small></article>
+            <article><p>失败投递</p><strong id="failure-count">0</strong><small>当前记录窗口</small></article>
+          </div>
+          <article class="guide-panel"><div><p class="eyebrow">配置顺序</p><h3>验证上游，再绑定接口凭据</h3></div><ol><li>新增并验证中国移动 API Key。</li><li>创建 Gotify Token 或 Webhook Secret。</li><li>勾选一个或多个上游通道后保存。</li></ol></article>
+        </section>
+
+        <section id="upstreams" class="view" aria-labelledby="upstreams-title">
+          <div class="section-heading"><div><p class="eyebrow">UPSTREAMS</p><h3 id="upstreams-title">上游通道</h3><p>API Key 会先进行真实 WebSocket 鉴权。验证失败不会保存。</p></div></div>
+          <div class="split-layout">
+            <article class="tool-panel"><h4>新增上游</h4><form id="upstream-form" novalidate><label>名称 <span class="required">*</span><input name="name" maxlength="60" placeholder="例如：生产环境" required /></label><label>上游 API Key <span class="required">*</span><input name="apiKey" type="password" autocomplete="off" placeholder="ak_xxx" required /></label><p id="upstream-message" class="form-message" role="status"></p><button class="button primary" type="submit">验证并保存</button></form></article>
+            <article class="table-panel"><h4>已验证通道</h4><div id="upstream-list" class="data-list"></div></article>
+          </div>
+        </section>
+
+        <section id="credentials" class="view" aria-labelledby="credentials-title">
+          <div class="section-heading"><div><p class="eyebrow">INGRESS AUTH</p><h3 id="credentials-title">接口鉴权与绑定</h3><p>一个接口凭据可绑定多个上游；每次通知会广播至全部已选通道。</p></div></div>
+          <div class="split-layout">
+            <article class="tool-panel"><h4>新增接口凭据</h4><form id="credential-form" novalidate><label>名称 <span class="required">*</span><input name="name" maxlength="60" placeholder="例如：监控 Gotify" required /></label><label>接口类型 <span class="required">*</span><select name="kind"><option value="gotify">Gotify Token</option><option value="webhook">Webhook Bearer Secret</option></select></label><label>访问密钥 <span class="optional">留空自动生成</span><input name="secret" autocomplete="off" placeholder="自定义或自动生成" /></label><fieldset><legend>绑定上游 <span class="required">至少选择一个</span></legend><div id="binding-options" class="check-list"></div></fieldset><p id="credential-message" class="form-message" role="status"></p><button id="credential-submit" class="button primary" type="submit">保存接口凭据</button></form></article>
+            <article class="table-panel"><h4>已配置凭据</h4><div id="credential-list" class="data-list"></div></article>
+          </div>
+        </section>
+
+        <section id="manual" class="view" aria-labelledby="manual-title">
+          <div class="section-heading"><div><p class="eyebrow">MANUAL DELIVERY</p><h3 id="manual-title">手动推送</h3><p>选择一个或多个已验证上游，直接发送文本通知。</p></div></div>
+          <article class="tool-panel push-panel"><form id="push-form" novalidate><div class="push-fields"><label>标题 <span class="optional">可选</span><input name="title" maxlength="120" placeholder="例如：系统通知" /></label><label>消息内容 <span class="required">*</span><textarea name="message" rows="6" maxlength="4000" placeholder="输入要发送的内容" required></textarea></label></div><fieldset><legend>投递上游 <span class="required">至少选择一个</span></legend><div id="manual-upstream-options" class="check-list"></div></fieldset><p id="push-message" class="form-message" role="status"></p><button id="push-submit" class="button primary" type="submit">发送通知</button></form></article>
+        </section>
+
+        <section id="history" class="view" aria-labelledby="history-title">
+          <div class="section-heading history-heading"><div><p class="eyebrow">DELIVERY HISTORY</p><h3 id="history-title">发送记录</h3><p>每个绑定上游都会生成独立记录，最多显示最近 500 条。</p></div><button id="refresh-history" class="button secondary" type="button">刷新记录</button></div>
+          <article class="history-panel"><div class="history-table-wrap"><table><thead><tr><th>时间</th><th>入口</th><th>上游通道</th><th>内容</th><th>状态</th><th>结果</th></tr></thead><tbody id="history-list"></tbody></table></div><p id="history-empty" class="empty-state" hidden>暂无发送记录。</p></article>
+        </section>
+      </section>
+    </main>
+    <dialog id="secret-dialog" aria-labelledby="secret-dialog-title">
+      <div class="dialog-content">
+        <p class="eyebrow">仅显示一次</p>
+        <h3 id="secret-dialog-title">保存新接口密钥</h3>
+        <p>请立即复制并保存。关闭此窗口后，管理台只显示脱敏值。</p>
+        <code id="created-secret"></code>
+        <div class="dialog-actions"><button id="copy-secret" class="button secondary" type="button">复制密钥</button><button id="close-secret" class="button primary compact" type="button">我已保存</button></div>
+      </div>
+    </dialog>
+    <dialog id="confirm-dialog" aria-labelledby="confirm-dialog-title">
+      <div class="dialog-content"><p class="eyebrow">确认操作</p><h3 id="confirm-dialog-title">删除配置</h3><p id="confirm-dialog-message"></p><div class="dialog-actions"><button id="cancel-confirm" class="button secondary" type="button">取消</button><button id="approve-confirm" class="button danger compact" type="button">确认删除</button></div></div>
+    </dialog>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
