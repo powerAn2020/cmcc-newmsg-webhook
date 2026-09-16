@@ -354,6 +354,88 @@ export class AccessLogger {
     };
   }
 
+  public async readDangerousLogs(
+    dateStr?: string,
+    page = 1,
+    pageSize = 50
+  ): Promise<{
+    date: string;
+    page: number;
+    pageSize: number;
+    total: number;
+    totalPages: number;
+    items: any[];
+    format: 'text' | 'json';
+  }> {
+    const targetDate = dateStr?.trim() || this.getCurrentDateStr();
+    const safePage = Math.max(1, Number(page) || 1);
+    const safePageSize = Math.max(1, Math.min(Number(pageSize) || 50, 500));
+
+    let filePath = this.getDailyFilePath(targetDate);
+    if (!fs.existsSync(filePath)) {
+      if (targetDate === this.getCurrentDateStr() && fs.existsSync(this.baseFilePath)) {
+        filePath = this.baseFilePath;
+      } else {
+        return {
+          date: targetDate,
+          page: 1,
+          pageSize: safePageSize,
+          total: 0,
+          totalPages: 1,
+          items: [],
+          format: this.format
+        };
+      }
+    }
+
+    try {
+      const content = await fs.promises.readFile(filePath, 'utf8');
+      const lines = content.trim().split('\n').filter(Boolean);
+      lines.reverse();
+
+      const dangerousItems: any[] = [];
+      for (let i = 0; i < lines.length; i++) {
+        const parsed = parseLogLine(lines[i]);
+        if (!parsed) continue;
+        const statusCode = Number(parsed.statusCode);
+        const isDangerous = (statusCode >= 400) ||
+          (parsed.authType && String(parsed.authType).startsWith('invalid_')) ||
+          (parsed.authType === 'login_failed') ||
+          (Boolean(parsed.error));
+        if (isDangerous) {
+          dangerousItems.push(parsed);
+        }
+      }
+
+      const total = dangerousItems.length;
+      const totalPages = Math.max(1, Math.ceil(total / safePageSize));
+      const validPage = Math.min(safePage, totalPages);
+      const start = (validPage - 1) * safePageSize;
+      const items = dangerousItems.slice(start, start + safePageSize);
+
+      return {
+        date: targetDate,
+        page: validPage,
+        pageSize: safePageSize,
+        total,
+        totalPages,
+        items,
+        format: this.format
+      };
+    } catch (err) {
+      console.error(`Failed to read dangerous logs for date ${targetDate}:`, err);
+      return {
+        date: targetDate,
+        page: 1,
+        pageSize: safePageSize,
+        total: 0,
+        totalPages: 1,
+        items: [],
+        format: this.format
+      };
+    }
+  }
+
   public cleanupOldLogs(retentionDays = this.retentionDays): number {
     let deletedCount = 0;
     if (retentionDays < 1) return 0;

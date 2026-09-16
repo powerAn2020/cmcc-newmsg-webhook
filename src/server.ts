@@ -451,15 +451,37 @@ export async function createApp(config = loadConfig(), services: AppServices = {
   });
 
   app.post<{ Querystring: { token?: string }; Body: GotifyRequest }>('/message', async (request, reply) => {
+    const ip = request.ip;
+    const allowed = store.loginAllowed(ip);
+    if (!allowed.allowed) {
+      return reply.code(429).header('Retry-After', String(allowed.retryAfter)).send({
+        error: 'IP is temporarily blocked due to too many failed attempts',
+        retryAfter: allowed.retryAfter
+      });
+    }
+
     const token =
       request.query.token ||
       (typeof request.headers['x-gotify-key'] === 'string' ? request.headers['x-gotify-key'] : undefined) ||
       (request.headers.authorization?.startsWith('Bearer ') ? request.headers.authorization.slice(7).trim() : undefined);
     const credential = token ? store.findCredential('gotify', token) : undefined;
     if (!credential || credential.upstreams.length === 0) {
+      const failResult = store.recordLoginFailure(ip);
       (request as any).audit = { authType: 'invalid_gotify_token', maskedSecret: token ? maskSecretKey(token) : undefined };
+      if (failResult.locked) {
+        const settings = store.getSecuritySettings();
+        if (settings.notifyOnAuthFailed) {
+          sendSecurityAlert(
+            'auth_failed',
+            '【安全告警】消息接口多次鉴权失败触发 IP 封禁',
+            `接口: POST /message\n来源 IP: ${ip}\n连续失败次数: ${failResult.count}\n封禁时长: ${Math.round(failResult.lockDurationMs / 60000)} 分钟\n凭据脱敏: ${token ? maskSecretKey(token) : '未提供'}`,
+            ip
+          );
+        }
+      }
       return reply.unauthorized('invalid or unbound Gotify token');
     }
+    store.clearLoginFailures(ip);
     (request as any).audit = {
       authType: 'gotify',
       credentialName: credential.name,
@@ -544,13 +566,35 @@ export async function createApp(config = loadConfig(), services: AppServices = {
   });
 
   app.post<{ Body: NativeSendRequest }>('/webhook', async (request, reply) => {
+    const ip = request.ip;
+    const allowed = store.loginAllowed(ip);
+    if (!allowed.allowed) {
+      return reply.code(429).header('Retry-After', String(allowed.retryAfter)).send({
+        error: 'IP is temporarily blocked due to too many failed attempts',
+        retryAfter: allowed.retryAfter
+      });
+    }
+
     const authorization = request.headers.authorization;
     const secret = authorization?.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
     const credential = secret ? store.findCredential('webhook', secret) : undefined;
     if (!credential || credential.upstreams.length === 0) {
+      const failResult = store.recordLoginFailure(ip);
       (request as any).audit = { authType: 'invalid_webhook_secret', maskedSecret: secret ? maskSecretKey(secret) : undefined };
+      if (failResult.locked) {
+        const settings = store.getSecuritySettings();
+        if (settings.notifyOnAuthFailed) {
+          sendSecurityAlert(
+            'auth_failed',
+            '【安全告警】消息接口多次鉴权失败触发 IP 封禁',
+            `接口: POST /webhook\n来源 IP: ${ip}\n连续失败次数: ${failResult.count}\n封禁时长: ${Math.round(failResult.lockDurationMs / 60000)} 分钟\n凭据脱敏: ${secret ? maskSecretKey(secret) : '未提供'}`,
+            ip
+          );
+        }
+      }
       return reply.unauthorized('invalid or unbound webhook secret');
     }
+    store.clearLoginFailures(ip);
     (request as any).audit = {
       authType: 'webhook',
       credentialName: credential.name,
@@ -1026,6 +1070,34 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       return accessLogger.readLogsByDate(date, page, pageSize);
     }
   );
+
+  app.get('/admin/api/risks/summary', { preHandler: requireAdmin }, async () => {
+    return store.getSecurityRiskSummary();
+  });
+
+  app.get('/admin/api/risks/bans', { preHandler: requireAdmin }, async () => {
+    return { items: store.listLockedIps() };
+  });
+
+  app.delete<{ Params: { ip: string } }>('/admin/api/risks/bans/:ip', { preHandler: requireAdmin }, async (request, reply) => {
+    const ip = request.params.ip?.trim();
+    if (!ip) return reply.badRequest('IP is required');
+    const unbanned = store.unbanIp(ip);
+    return { ok: true, unbanned };
+  });
+
+  app.get<{ Querystring: { page?: string; pageSize?: string } }>('/admin/api/risks/alerts', { preHandler: requireAdmin }, async request => {
+    const page = Math.max(1, Number(request.query.page) || 1);
+    const pageSize = Math.max(1, Math.min(Number(request.query.pageSize) || 20, 100));
+    return store.listSecurityAlerts(page, pageSize);
+  });
+
+  app.get<{ Querystring: { date?: string; page?: string; pageSize?: string } }>('/admin/api/risks/dangerous-logs', { preHandler: requireAdmin }, async request => {
+    const date = request.query.date?.trim() || accessLogger.getTodayDate();
+    const page = Math.max(1, Number(request.query.page) || 1);
+    const pageSize = Math.max(1, Math.min(Number(request.query.pageSize) || 20, 100));
+    return accessLogger.readDangerousLogs(date, page, pageSize);
+  });
 
   app.get('/admin/api/upstreams', { preHandler: requireAdmin }, async () => store.listUpstreams());
   app.post<{ Body: { name?: string; apiKey?: string } }>('/admin/api/upstreams', { preHandler: requireAdmin }, async (request, reply) => {

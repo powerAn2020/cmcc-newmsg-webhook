@@ -583,6 +583,7 @@ describe('admin push API', () => {
       await app.inject({
         method: 'POST',
         url: '/message?token=invalid_alert_tok_1',
+        remoteAddress: '198.51.100.1',
         payload: { message: 'should fail 1' }
       });
       await new Promise(r => setTimeout(r, 50));
@@ -592,6 +593,7 @@ describe('admin push API', () => {
       await app.inject({
         method: 'POST',
         url: '/message?token=invalid_alert_tok_2',
+        remoteAddress: '198.51.100.1',
         payload: { message: 'should fail 2' }
       });
       await new Promise(r => setTimeout(r, 50));
@@ -767,6 +769,154 @@ describe('admin push API', () => {
       });
       expect(res2.statusCode).toBe(429);
       expect(res2.json().error).toContain('已被拦截抑制');
+    });
+
+    it('manages risk summary, locked IP bans, unban, and dangerous logs API', async () => {
+      // 1. Unauthenticated request should be rejected
+      const unauth = await app.inject({ method: 'GET', url: '/admin/api/risks/summary' });
+      expect(unauth.statusCode).toBe(401);
+
+      // 2. Summary with admin auth
+      const summaryRes = await app.inject({
+        method: 'GET',
+        url: '/admin/api/risks/summary',
+        headers: { cookie }
+      });
+      expect(summaryRes.statusCode).toBe(200);
+      const summary = summaryRes.json();
+      expect(summary).toHaveProperty('lockedCount');
+      expect(summary).toHaveProperty('todayAlertsCount');
+      expect(summary).toHaveProperty('totalAlertsCount');
+      expect(summary).toHaveProperty('recentAlerts');
+
+      // 3. Trigger a lock on an IP
+      const badIp = '198.51.100.99';
+      for (let i = 0; i < 5; i++) {
+        await app.inject({
+          method: 'POST',
+          url: '/admin/api/login',
+          payload: { username: 'admin', password: 'wrong_password' },
+          remoteAddress: badIp
+        });
+      }
+
+      // Check bans
+      const bansRes = await app.inject({
+        method: 'GET',
+        url: '/admin/api/risks/bans',
+        headers: { cookie }
+      });
+      expect(bansRes.statusCode).toBe(200);
+      const bans = bansRes.json();
+      expect(bans.items.some((item: any) => item.ip === badIp)).toBe(true);
+
+      // Unban IP
+      const unbanRes = await app.inject({
+        method: 'DELETE',
+        url: `/admin/api/risks/bans/${badIp}`,
+        headers: { cookie }
+      });
+      expect(unbanRes.statusCode).toBe(200);
+      expect(unbanRes.json().ok).toBe(true);
+
+      // Check bans again
+      const bansAfter = await app.inject({
+        method: 'GET',
+        url: '/admin/api/risks/bans',
+        headers: { cookie }
+      });
+      expect(bansAfter.json().items.some((item: any) => item.ip === badIp)).toBe(false);
+
+      // 4. Alerts endpoint
+      const alertsRes = await app.inject({
+        method: 'GET',
+        url: '/admin/api/risks/alerts?page=1&pageSize=10',
+        headers: { cookie }
+      });
+      expect(alertsRes.statusCode).toBe(200);
+      expect(alertsRes.json()).toHaveProperty('items');
+      expect(alertsRes.json()).toHaveProperty('total');
+
+      // 5. Dangerous logs endpoint
+      const dangerousRes = await app.inject({
+        method: 'GET',
+        url: '/admin/api/risks/dangerous-logs?page=1&pageSize=10',
+        headers: { cookie }
+      });
+      expect(dangerousRes.statusCode).toBe(200);
+      expect(dangerousRes.json()).toHaveProperty('items');
+      expect(dangerousRes.json()).toHaveProperty('total');
+    });
+
+    it('blocks IP after repeated invalid token/secret attempts on /message and /webhook', async () => {
+      const badIp = '198.51.100.99';
+
+      // 4 failed attempts on /message
+      for (let i = 0; i < 4; i++) {
+        const res = await app.inject({
+          method: 'POST',
+          url: '/message?token=invalid_gotify_token',
+          remoteAddress: badIp,
+          payload: { message: 'hello' }
+        });
+        expect(res.statusCode).toBe(401);
+      }
+
+      // 5th attempt triggers lock (limit is 5)
+      const lockRes = await app.inject({
+        method: 'POST',
+        url: '/message?token=invalid_gotify_token',
+        remoteAddress: badIp,
+        payload: { message: 'hello' }
+      });
+      expect(lockRes.statusCode).toBe(401);
+
+      // 6th attempt should immediately return 429 due to IP ban
+      const blockedRes = await app.inject({
+        method: 'POST',
+        url: '/message?token=invalid_gotify_token',
+        remoteAddress: badIp,
+        payload: { message: 'hello' }
+      });
+      expect(blockedRes.statusCode).toBe(429);
+      expect(blockedRes.headers['retry-after']).toBeDefined();
+      expect(blockedRes.json().error).toContain('temporarily blocked');
+
+      // Also blocked on /webhook from the same IP
+      const blockedWebhook = await app.inject({
+        method: 'POST',
+        url: '/webhook',
+        headers: { authorization: 'Bearer invalid_secret' },
+        remoteAddress: badIp,
+        payload: { type: 'send', content: 'hello' }
+      });
+      expect(blockedWebhook.statusCode).toBe(429);
+
+      // Verify it appears in risk management banned IP list
+      const bansRes = await app.inject({
+        method: 'GET',
+        url: '/admin/api/risks/bans',
+        headers: { cookie }
+      });
+      expect(bansRes.statusCode).toBe(200);
+      expect(bansRes.json().items.some((item: any) => item.ip === badIp)).toBe(true);
+
+      // Unban IP
+      const unbanRes = await app.inject({
+        method: 'DELETE',
+        url: `/admin/api/risks/bans/${badIp}`,
+        headers: { cookie }
+      });
+      expect(unbanRes.statusCode).toBe(200);
+
+      // Now request is allowed past IP check (returns 401 instead of 429)
+      const afterUnbanRes = await app.inject({
+        method: 'POST',
+        url: '/message?token=invalid_gotify_token',
+        remoteAddress: badIp,
+        payload: { message: 'hello' }
+      });
+      expect(afterUnbanRes.statusCode).toBe(401);
     });
   });
 });

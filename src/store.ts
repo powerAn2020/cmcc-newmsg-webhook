@@ -32,6 +32,15 @@ export interface IStore {
   setSetting(key: string, value: string): void;
   getSecuritySettings(): SecurityAlertSettings;
   updateSecuritySettings(settings: Partial<SecurityAlertSettings>): void;
+  listLockedIps(): { ip: string; failedCount: number; firstFailedAt: string; lockedUntil: string }[];
+  unbanIp(ip: string): boolean;
+  listSecurityAlerts(page?: number, pageSize?: number): { items: HistoryEntry[]; total: number; page: number; pageSize: number; totalPages: number };
+  getSecurityRiskSummary(): {
+    lockedCount: number;
+    todayAlertsCount: number;
+    totalAlertsCount: number;
+    recentAlerts: HistoryEntry[];
+  };
   close(): void;
 }
 
@@ -227,6 +236,64 @@ export class Store implements IStore {
     return { count, locked, lockDurationMs: this.loginBanDurationMs };
   }
   clearLoginFailures(ip: string) { this.db.prepare('DELETE FROM login_attempts WHERE ip = ?').run(ip); }
+  unbanIp(ip: string): boolean {
+    const result = this.db.prepare('DELETE FROM login_attempts WHERE ip = ?').run(ip);
+    return result.changes > 0;
+  }
+  listLockedIps(): { ip: string; failedCount: number; firstFailedAt: string; lockedUntil: string }[] {
+    const rows = this.db.prepare(`
+      SELECT ip, failed_count, first_failed_at, locked_until
+      FROM login_attempts
+      WHERE locked_until IS NOT NULL AND locked_until > ?
+      ORDER BY locked_until DESC
+    `).all(now()) as any[];
+    return rows.map(r => ({
+      ip: r.ip,
+      failedCount: r.failed_count,
+      firstFailedAt: r.first_failed_at,
+      lockedUntil: r.locked_until
+    }));
+  }
+  listSecurityAlerts(page = 1, pageSize = 50): { items: HistoryEntry[]; total: number; page: number; pageSize: number; totalPages: number } {
+    const safePage = Math.max(1, Number(page) || 1);
+    const safePageSize = Math.max(1, Math.min(Number(pageSize) || 50, 500));
+    const countRow = this.db.prepare("SELECT COUNT(1) as total FROM notification_history WHERE source = 'system'").get() as { total: number };
+    const total = countRow?.total ?? 0;
+    const totalPages = Math.max(1, Math.ceil(total / safePageSize));
+    const offset = (safePage - 1) * safePageSize;
+    const items = this.db.prepare(`SELECT h.id, h.created_at, h.source, c.name credential_name, u.name upstream_name, h.status, h.title, h.content, h.media_type, h.message_id, h.error
+      FROM notification_history h LEFT JOIN credentials c ON c.id = h.credential_id LEFT JOIN upstreams u ON u.id = h.upstream_id
+      WHERE h.source = 'system'
+      ORDER BY h.id DESC LIMIT ? OFFSET ?`).all(safePageSize, offset).map((row: any) => ({
+        id: row.id, createdAt: row.created_at, source: row.source, credentialName: row.credential_name, upstreamName: row.upstream_name,
+        status: row.status, title: row.title, content: row.content, mediaType: row.media_type, messageId: row.message_id, error: row.error
+      }));
+    return { items, total, page: safePage, pageSize: safePageSize, totalPages };
+  }
+  getSecurityRiskSummary(): {
+    lockedCount: number;
+    todayAlertsCount: number;
+    totalAlertsCount: number;
+    recentAlerts: HistoryEntry[];
+  } {
+    const currentTime = now();
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const todayIso = todayStart.toISOString();
+
+    const lockedRow = this.db.prepare('SELECT COUNT(1) as count FROM login_attempts WHERE locked_until IS NOT NULL AND locked_until > ?').get(currentTime) as { count: number };
+    const todayRow = this.db.prepare("SELECT COUNT(1) as count FROM notification_history WHERE source = 'system' AND created_at >= ?").get(todayIso) as { count: number };
+    const totalRow = this.db.prepare("SELECT COUNT(1) as count FROM notification_history WHERE source = 'system'").get() as { count: number };
+
+    const recent = this.listSecurityAlerts(1, 5).items;
+
+    return {
+      lockedCount: lockedRow?.count ?? 0,
+      todayAlertsCount: todayRow?.count ?? 0,
+      totalAlertsCount: totalRow?.count ?? 0,
+      recentAlerts: recent
+    };
+  }
 
   getSetting(key: string, defaultValue = ''): string {
     const row = this.db.prepare('SELECT value FROM system_settings WHERE key = ?').get(key) as { value: string } | undefined;

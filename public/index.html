@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="color-scheme" content="light" />
   <title>新消息控制台</title>
-  <link rel="stylesheet" href="/app.css" />
+  <link rel="stylesheet" href="/app.css?v=3" />
 </head>
 
 <body>
@@ -42,6 +42,10 @@
         <button class="nav-item" data-view="manual">手动推送</button>
         <button class="nav-item" data-view="history">发送记录</button>
         <button class="nav-item" data-view="logs">访问日志</button>
+        <button class="nav-item" data-view="risks">
+          <span>异常风险</span>
+          <span id="risk-nav-badge" class="nav-badge danger" hidden>0</span>
+        </button>
         <button class="nav-item" data-view="settings">系统设置</button>
       </nav>
       <div class="sidebar-footer"><span id="operator-name"></span><button id="logout-button" class="text-button"
@@ -61,7 +65,26 @@
         </div>
       </header>
 
-      <section id="overview" class="view active" aria-labelledby="page-title">
+      <aside id="global-risk-alert-banner" class="risk-alert-banner" hidden>
+        <div class="risk-alert-icon">⚠️</div>
+        <div class="risk-alert-content">
+          <strong id="risk-alert-title">系统安全风险预警</strong>
+          <p id="risk-alert-desc">检测到近期异常拦截或活跃封禁 IP，请及时排查！</p>
+        </div>
+        <div class="risk-alert-actions">
+          <button id="risk-banner-action" class="button danger compact" type="button">立即排查</button>
+          <button id="risk-banner-dismiss" class="text-button" style="color:inherit; font-weight:bold; font-size:16px; padding:0 6px;" type="button" title="暂时收起">✕</button>
+        </div>
+      </aside>
+
+      <section id="overview" class="view active" aria-labelledby="overview-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">OVERVIEW</p>
+            <h3 id="overview-title">服务概览与状态</h3>
+            <p>实时汇总已验证上游通道、接口凭据绑定与近期消息投递指标。</p>
+          </div>
+        </div>
         <div class="stats" aria-label="服务统计">
           <article>
             <p>已验证上游</p><strong id="upstream-count">0</strong><small>API Key 通道</small>
@@ -287,6 +310,113 @@
               <button id="logs-prev-page" class="pagination-btn" type="button">上一页</button>
               <button id="logs-next-page" class="pagination-btn" type="button">下一页</button>
               <button id="logs-last-page" class="pagination-btn" type="button">末页</button>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section id="risks" class="view" aria-labelledby="risks-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">RISK & SECURITY</p>
+            <h3 id="risks-title">异常风险与安全审计</h3>
+            <p>集中监控系统异常告警、接口攻击拦截、防消息轰炸风控与恶意 IP 封禁。</p>
+          </div>
+          <div class="topbar-actions">
+            <button id="refresh-risks-btn" class="button secondary compact" type="button">刷新风险数据</button>
+          </div>
+        </div>
+
+        <div class="stats" aria-label="安全态势指标">
+          <article>
+            <p>今日安全告警</p><strong id="risk-today-alerts">0</strong><small>系统通报与拦截事件</small>
+          </article>
+          <article>
+            <p>当前封禁 IP</p><strong id="risk-active-bans">0</strong><small>多次密码错误锁定中</small>
+          </article>
+          <article>
+            <p>历史系统告警</p><strong id="risk-total-alerts">0</strong><small>累计安全通报总数</small>
+          </article>
+          <article>
+            <p>实时防护</p><strong style="color:var(--teal)">运行中</strong><small>防暴力破解 / 防轰炸</small>
+          </article>
+        </div>
+
+        <article class="tool-panel" style="margin-top: 20px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; flex-wrap:wrap; gap:8px;">
+            <h4 style="margin:0;">🔒 当前封禁 IP 列表</h4>
+            <small style="color:var(--muted);">多次密码错误触发封禁，到期自动解除；管理员可提前一键解封</small>
+          </div>
+          <div id="risk-bans-list" class="data-list"></div>
+          <p id="risk-bans-empty" class="empty-state" style="padding: 24px; color: var(--teal); font-weight: 500;" hidden>
+            🛡️ 当前无被封禁的 IP，系统登录环境安全
+          </p>
+        </article>
+
+        <article class="table-panel" style="margin-top: 20px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; flex-wrap:wrap; gap:10px;">
+            <div>
+              <h4 style="margin:0 0 4px;">📢 系统安全告警记录</h4>
+              <small style="color:var(--muted);">记录已触发并推送至上游通道的系统安全事件</small>
+            </div>
+          </div>
+          <div class="history-table-wrap">
+            <table aria-label="安全告警记录">
+              <thead>
+                <tr>
+                  <th style="width: 165px;">时间</th>
+                  <th style="width: 190px;">告警标题</th>
+                  <th>详细内容</th>
+                  <th style="width: 130px;">推送通道</th>
+                  <th style="width: 95px;">推送状态</th>
+                </tr>
+              </thead>
+              <tbody id="risk-alerts-tbody"></tbody>
+            </table>
+          </div>
+          <p id="risk-alerts-empty" class="empty-state" hidden>暂无系统安全告警记录</p>
+          <div id="risk-alerts-pagination" class="pagination-bar" hidden>
+            <span class="pagination-info">共 <strong id="risk-alerts-total-count">0</strong> 条记录，第 <strong id="risk-alerts-current-page">1</strong>/<strong id="risk-alerts-total-pages">1</strong> 页</span>
+            <div class="pagination-actions">
+              <button id="risk-alerts-prev" class="pagination-btn" type="button">上一页</button>
+              <button id="risk-alerts-next" class="pagination-btn" type="button">下一页</button>
+            </div>
+          </div>
+        </article>
+
+        <article class="table-panel" style="margin-top: 20px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; flex-wrap:wrap; gap:10px;">
+            <div>
+              <h4 style="margin:0 0 4px;">🛑 危险与异常访问审计</h4>
+              <small style="color:var(--muted);">实时筛选 HTTP 401/429/500 等异常拦截与未授权请求日志</small>
+            </div>
+            <div class="log-toolbar">
+              <label style="margin:0; font-size:13px; font-weight:normal; display:flex; align-items:center; gap:6px;">
+                日志日期:
+                <select id="risk-log-date" class="log-select"></select>
+              </label>
+            </div>
+          </div>
+          <div class="history-table-wrap">
+            <table aria-label="危险访问日志">
+              <thead>
+                <tr>
+                  <th style="width: 165px;">时间</th>
+                  <th style="width: 130px;">来源 IP</th>
+                  <th style="width: 85px;">状态码</th>
+                  <th style="width: 160px;">请求方法与端点</th>
+                  <th>拦截说明 / 错误详情</th>
+                </tr>
+              </thead>
+              <tbody id="risk-logs-tbody"></tbody>
+            </table>
+          </div>
+          <p id="risk-logs-empty" class="empty-state" hidden>该日期暂无危险访问记录</p>
+          <div id="risk-logs-pagination" class="pagination-bar" hidden>
+            <span class="pagination-info">共 <strong id="risk-logs-total-count">0</strong> 条记录，第 <strong id="risk-logs-current-page">1</strong>/<strong id="risk-logs-total-pages">1</strong> 页</span>
+            <div class="pagination-actions">
+              <button id="risk-logs-prev" class="pagination-btn" type="button">上一页</button>
+              <button id="risk-logs-next" class="pagination-btn" type="button">下一页</button>
             </div>
           </div>
         </article>

@@ -26,6 +26,7 @@ async function refreshAll() {
   renderUpstreams();
   renderCredentials();
   renderHistory(history);
+  import('./views/risks.js').then(m => m.updateRiskSummaryAndBanner());
 }
 
 function activateView(name) {
@@ -38,13 +39,24 @@ function activateView(name) {
     manual: '手动推送',
     history: '发送记录',
     logs: '访问日志',
+    risks: '异常风险',
     settings: '系统设置'
   })[name] || '概览';
+
+  const ws = $('.workspace');
+  if (ws) ws.scrollTop = 0;
+  window.scrollTo({ top: 0, behavior: 'instant' });
+  const activeBtn = $(`.nav-item[data-view="${name}"]`);
+  if (activeBtn?.scrollIntoView) {
+    activeBtn.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+  }
 
   if (name === 'logs') {
     fetchLogDates().then(() => {
       import('./views/logs.js').then(m => m.refreshLogs(1));
     });
+  } else if (name === 'risks') {
+    import('./views/risks.js').then(m => m.loadAndRenderRisks());
   } else if (name === 'settings') {
     loadAndPopulateSettings();
   } else if (name === 'history') {
