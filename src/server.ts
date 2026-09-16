@@ -708,12 +708,19 @@ export async function createApp(config = loadConfig(), services: AppServices = {
     }
     store.clearLoginFailures(ip);
     (request as any).audit = { authType: 'login_success', credentialName: config.adminUsername };
-    sendSecurityAlert(
-      'login',
-      '【安全提示】管理员登录成功',
-      `管理员账户: ${config.adminUsername}\n登录 IP: ${ip}\n登录时间: ${new Date().toLocaleString('zh-CN', { hour12: false })}`,
-      ip
-    );
+
+    const previousIp = store.getLastLoginIp();
+    store.setLastLoginIp(ip);
+    store.setSetting('last_login_time', new Date().toISOString());
+
+    if (previousIp && previousIp !== ip) {
+      sendSecurityAlert(
+        'login',
+        '【安全告警】管理员异地/新IP登录提示',
+        `管理员账户: ${config.adminUsername}\n当前登录 IP: ${ip}\n上次登录 IP: ${previousIp}\n登录时间: ${new Date().toLocaleString('zh-CN', { hour12: false })}`,
+        ip
+      );
+    }
     const sessionId = crypto.randomBytes(32).toString('base64url');
     const expires = new Date(Date.now() + 8 * 60 * 60_000);
     store.createSession(sessionId, expires);

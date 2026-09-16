@@ -547,21 +547,33 @@ describe('admin push API', () => {
 
       pool.send.mockClear();
 
-      // Test 1: Login success alert
-      const loginRes = await app.inject({
+      // Test 1: Same IP login does not alert; different IP login alerts
+      // Attempt 1A: Same IP login from 127.0.0.1 (last login was also 127.0.0.1 in beforeEach)
+      const sameIpLogin = await app.inject({
         method: 'POST',
         url: '/admin/api/login',
+        remoteAddress: '127.0.0.1',
         payload: { username: 'admin', password: 'password' }
       });
-      expect(loginRes.statusCode).toBe(200);
+      expect(sameIpLogin.statusCode).toBe(200);
+      await new Promise(r => setTimeout(r, 50));
+      expect(pool.send).not.toHaveBeenCalled();
 
-      // Wait a tick for async notification delivery
+      // Attempt 1B: Different IP login from 198.51.100.88 -> triggers alert
+      const diffIpLogin = await app.inject({
+        method: 'POST',
+        url: '/admin/api/login',
+        remoteAddress: '198.51.100.88',
+        payload: { username: 'admin', password: 'password' }
+      });
+      expect(diffIpLogin.statusCode).toBe(200);
+
       await new Promise(r => setTimeout(r, 50));
       expect(pool.send).toHaveBeenCalledWith(
         { apiKey: 'ak_primary' },
         expect.objectContaining({
           type: 'send',
-          content: expect.stringContaining('【安全提示】管理员登录成功')
+          content: expect.stringContaining('【安全告警】管理员异地/新IP登录提示')
         })
       );
 
@@ -572,7 +584,7 @@ describe('admin push API', () => {
         headers: { cookie }
       });
       const historyItems = histRes.json();
-      const loginHistory = historyItems.find((h: any) => h.source === 'system' && h.title?.includes('管理员登录成功'));
+      const loginHistory = historyItems.find((h: any) => h.source === 'system' && h.title?.includes('管理员异地/新IP登录提示'));
       expect(loginHistory).toBeDefined();
       expect(loginHistory.status).toBe('success');
 

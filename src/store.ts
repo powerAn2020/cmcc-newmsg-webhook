@@ -30,6 +30,8 @@ export interface IStore {
   clearLoginFailures(ip: string): void;
   getSetting(key: string, defaultValue?: string): string;
   setSetting(key: string, value: string): void;
+  getLastLoginIp(): string | null;
+  setLastLoginIp(ip: string): void;
   getSecuritySettings(): SecurityAlertSettings;
   updateSecuritySettings(settings: Partial<SecurityAlertSettings>): void;
   listLockedIps(): { ip: string; failedCount: number; firstFailedAt: string; lockedUntil: string }[];
@@ -321,6 +323,15 @@ export class Store implements IStore {
       INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
     `).run(key, value, time);
+  }
+
+  getLastLoginIp(): string | null {
+    const ip = this.getSetting('last_login_ip');
+    return ip && ip.trim() ? ip.trim() : null;
+  }
+
+  setLastLoginIp(ip: string): void {
+    this.setSetting('last_login_ip', ip.trim());
   }
 
   getSecuritySettings(): SecurityAlertSettings {
