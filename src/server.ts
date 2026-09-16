@@ -19,6 +19,7 @@ import { downloadRemoteMedia, inferMediaType, isCmccMediaUrl, MAX_MEDIA_BYTES, v
 import { Store } from './store.js';
 import { chunkText, markdownToPlainText } from './text.js';
 import type { CmccAccount, CredentialKind, GotifyRequest, MediaType, NativeSendRequest } from './types.js';
+import { AccessLogger, maskSecretKey } from './logger.js';
 
 const sessionCookie = 'cmcc_admin_session';
 const publicRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../public');
@@ -57,7 +58,7 @@ type DispatchTarget = { credentialId?: number; upstreams: { id: number; name: st
 type Upstream = DispatchTarget['upstreams'][number];
 type PoolLike = Pick<CmccClientPool, 'send' | 'verify' | 'close'>;
 type UploaderLike = Pick<CmccUploader, 'upload'>;
-type AppServices = { pool?: PoolLike; uploader?: UploaderLike };
+type AppServices = { pool?: PoolLike; uploader?: UploaderLike; accessLogger?: AccessLogger };
 type ManualPushBody = {
   title?: string;
   message?: string;
@@ -175,11 +176,128 @@ export async function createApp(config = loadConfig(), services: AppServices = {
   });
   const pool = services.pool ?? new CmccClientPool(config.wsUrl, config.wsVersion, config.sendTimeoutMs);
   const uploader = services.uploader ?? new CmccUploader(config.uploadUrl, config.uploadTimeoutMs);
-  app.addHook('onClose', async () => { pool.close(); store.close(); });
+  const securitySettings = store.getSecuritySettings();
+  const accessLogger = services.accessLogger ?? new AccessLogger(config.accessLogPath, securitySettings.accessLogFormat);
+  accessLogger.startCleanupTimer(securitySettings.accessLogRetentionDays);
+  app.addHook('onClose', async () => { pool.close(); store.close(); await accessLogger.close(); });
+
+  const authFailTracker = new Map<string, { count: number; firstAt: number; lastAlertAt: number }>();
+
+  async function sendSecurityAlert(
+    type: 'login' | 'login_failed' | 'auth_failed',
+    title: string,
+    content: string,
+    ip: string
+  ) {
+    try {
+      const settings = store.getSecuritySettings();
+      if (type === 'login' && !settings.notifyOnLogin) return;
+      if (type === 'login_failed' && !settings.notifyOnLoginFailed) return;
+      if (type === 'auth_failed' && !settings.notifyOnAuthFailed) return;
+
+      let targets: { id: number; apiKey: string }[] = [];
+      if (settings.notifyUpstreamId > 0) {
+        const up = store.getUpstream(settings.notifyUpstreamId);
+        if (up) targets = [up];
+      } else {
+        const all = store.listUpstreams();
+        targets = all
+          .map(item => store.getUpstream(item.id))
+          .filter(Boolean) as { id: number; apiKey: string }[];
+      }
+
+      if (targets.length === 0) return;
+
+      const fullContent = `${title}\n${content}`;
+      for (const upstream of targets) {
+        pool.send({ apiKey: upstream.apiKey }, {
+          type: 'send',
+          content: fullContent,
+          timestamp: Date.now()
+        }).then(messageId => {
+          store.addHistory({
+            source: 'system',
+            upstreamId: upstream.id,
+            status: 'success',
+            title,
+            content: fullContent,
+            mediaType: null,
+            messageId,
+            error: null
+          });
+        }).catch(err => {
+          store.addHistory({
+            source: 'system',
+            upstreamId: upstream.id,
+            status: 'failed',
+            title,
+            content: fullContent,
+            mediaType: null,
+            messageId: null,
+            error: err instanceof Error ? err.message : String(err)
+          });
+        });
+      }
+    } catch (err) {
+      console.error('sendSecurityAlert error:', err);
+    }
+  }
+
+  app.addHook('onResponse', async (request, reply) => {
+    const audit = (request as any).audit as {
+      authType?: string;
+      credentialName?: string;
+      maskedSecret?: string;
+      upstreams?: string[];
+      error?: string;
+    } | undefined;
+
+    accessLogger.log({
+      ip: request.ip,
+      method: request.method,
+      url: request.url,
+      statusCode: reply.statusCode,
+      durationMs: reply.elapsedTime,
+      authType: audit?.authType,
+      credentialName: audit?.credentialName,
+      maskedSecret: audit?.maskedSecret,
+      upstreams: audit?.upstreams,
+      error: audit?.error
+    });
+
+    if (reply.statusCode === 401 && audit?.authType?.startsWith('invalid_')) {
+      const settings = store.getSecuritySettings();
+      if (settings.notifyOnAuthFailed) {
+        const windowMs = settings.notifyAuthFailWindowMin * 60_000;
+        const nowMs = Date.now();
+        let tracker = authFailTracker.get(request.ip);
+        if (!tracker || nowMs - tracker.firstAt > windowMs) {
+          tracker = { count: 1, firstAt: nowMs, lastAlertAt: 0 };
+        } else {
+          tracker.count += 1;
+        }
+        authFailTracker.set(request.ip, tracker);
+
+        if (tracker.count >= settings.notifyAuthFailThreshold && (tracker.lastAlertAt === 0 || nowMs - tracker.lastAlertAt >= windowMs)) {
+          tracker.lastAlertAt = nowMs;
+          sendSecurityAlert(
+            'auth_failed',
+            '【安全预警】未授权接口访问拦截',
+            `请求端点: ${request.method} ${request.url}\n来源 IP: ${request.ip}\n统计周期: ${settings.notifyAuthFailWindowMin} 分钟内累计拦截 ${tracker.count} 次（阈值: ${settings.notifyAuthFailThreshold} 次）\n拦截原因: ${audit.authType}\n凭据脱敏: ${audit.maskedSecret || '未提供'}`,
+            request.ip
+          );
+        }
+      }
+    }
+  });
 
   const requireAdmin = async (request: FastifyRequest, reply: FastifyReply) => {
     const sessionId = request.cookies[sessionCookie];
-    if (!sessionId || !store.hasSession(sessionId)) return reply.unauthorized('admin login required');
+    if (!sessionId || !store.hasSession(sessionId)) {
+      (request as any).audit = { authType: 'invalid_admin_session' };
+      return reply.unauthorized('admin login required');
+    }
+    (request as any).audit = { authType: 'admin_session', credentialName: config.adminUsername };
   };
 
   async function dispatch(
@@ -251,20 +369,30 @@ export async function createApp(config = loadConfig(), services: AppServices = {
   app.get('/healthz', async (request, reply) => {
     const sessionId = request.cookies[sessionCookie];
     if (sessionId && store.hasSession(sessionId)) {
+      (request as any).audit = { authType: 'admin_session', credentialName: config.adminUsername };
       return { ok: true };
     }
 
     const authorization = request.headers.authorization;
     if (authorization?.startsWith('Bearer ')) {
       const secret = authorization.slice(7).trim();
-      if (secret && (store.findCredential('webhook', secret) || store.findCredential('gotify', secret))) {
+      const webhookCred = secret ? store.findCredential('webhook', secret) : undefined;
+      const gotifyCred = !webhookCred && secret ? store.findCredential('gotify', secret) : undefined;
+      if (webhookCred) {
+        (request as any).audit = { authType: 'webhook', credentialName: webhookCred.name, maskedSecret: maskSecretKey(secret) };
+        return { ok: true };
+      }
+      if (gotifyCred) {
+        (request as any).audit = { authType: 'gotify', credentialName: gotifyCred.name, maskedSecret: maskSecretKey(secret) };
         return { ok: true };
       }
     }
 
     const gotifyKey = request.headers['x-gotify-key'];
     if (typeof gotifyKey === 'string' && gotifyKey.trim()) {
-      if (store.findCredential('gotify', gotifyKey.trim())) {
+      const cred = store.findCredential('gotify', gotifyKey.trim());
+      if (cred) {
+        (request as any).audit = { authType: 'gotify', credentialName: cred.name, maskedSecret: maskSecretKey(gotifyKey) };
         return { ok: true };
       }
     }
@@ -272,11 +400,20 @@ export async function createApp(config = loadConfig(), services: AppServices = {
     const queryToken = (request.query as { token?: string } | undefined)?.token;
     if (typeof queryToken === 'string' && queryToken.trim()) {
       const token = queryToken.trim();
-      if (store.findCredential('gotify', token) || store.findCredential('webhook', token)) {
+      const gotifyCred = store.findCredential('gotify', token);
+      const webhookCred = !gotifyCred ? store.findCredential('webhook', token) : undefined;
+      if (gotifyCred) {
+        (request as any).audit = { authType: 'gotify', credentialName: gotifyCred.name, maskedSecret: maskSecretKey(token) };
+        return { ok: true };
+      }
+      if (webhookCred) {
+        (request as any).audit = { authType: 'webhook', credentialName: webhookCred.name, maskedSecret: maskSecretKey(token) };
         return { ok: true };
       }
     }
 
+    const triedKey = queryToken || (typeof gotifyKey === 'string' ? gotifyKey : undefined) || (authorization?.startsWith('Bearer ') ? authorization.slice(7).trim() : undefined);
+    (request as any).audit = { authType: triedKey ? 'invalid_credential' : 'none', maskedSecret: triedKey ? maskSecretKey(triedKey) : undefined };
     return reply.code(404).send({ error: 'Not Found' });
   });
 
@@ -286,7 +423,16 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       (typeof request.headers['x-gotify-key'] === 'string' ? request.headers['x-gotify-key'] : undefined) ||
       (request.headers.authorization?.startsWith('Bearer ') ? request.headers.authorization.slice(7).trim() : undefined);
     const credential = token ? store.findCredential('gotify', token) : undefined;
-    if (!credential || credential.upstreams.length === 0) return reply.unauthorized('invalid or unbound Gotify token');
+    if (!credential || credential.upstreams.length === 0) {
+      (request as any).audit = { authType: 'invalid_gotify_token', maskedSecret: token ? maskSecretKey(token) : undefined };
+      return reply.unauthorized('invalid or unbound Gotify token');
+    }
+    (request as any).audit = {
+      authType: 'gotify',
+      credentialName: credential.name,
+      maskedSecret: maskSecretKey(token!),
+      upstreams: credential.upstreams.map(u => u.name)
+    };
 
     let body: GotifyRequest;
     let file: StagedFile | undefined;
@@ -345,7 +491,16 @@ export async function createApp(config = loadConfig(), services: AppServices = {
     const authorization = request.headers.authorization;
     const secret = authorization?.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
     const credential = secret ? store.findCredential('webhook', secret) : undefined;
-    if (!credential || credential.upstreams.length === 0) return reply.unauthorized('invalid or unbound webhook secret');
+    if (!credential || credential.upstreams.length === 0) {
+      (request as any).audit = { authType: 'invalid_webhook_secret', maskedSecret: secret ? maskSecretKey(secret) : undefined };
+      return reply.unauthorized('invalid or unbound webhook secret');
+    }
+    (request as any).audit = {
+      authType: 'webhook',
+      credentialName: credential.name,
+      maskedSecret: maskSecretKey(secret),
+      upstreams: credential.upstreams.map(u => u.name)
+    };
 
     let payload: NativeSendRequest;
     let file: StagedFile | undefined;
@@ -405,10 +560,36 @@ export async function createApp(config = loadConfig(), services: AppServices = {
     if (!allowed.allowed) return reply.code(429).header('Retry-After', String(allowed.retryAfter)).send({ error: 'too many login failures', retryAfter: allowed.retryAfter });
     const body = request.body ?? {};
     if (!safeEqual(body.username ?? '', config.adminUsername) || !safeEqual(body.password ?? '', config.adminPassword)) {
-      store.recordLoginFailure(ip);
+      const failResult = store.recordLoginFailure(ip);
+      (request as any).audit = { authType: 'login_failed', credentialName: body.username || 'unknown' };
+      const settings = store.getSecuritySettings();
+      if (settings.notifyOnLoginFailed) {
+        if (failResult.locked) {
+          sendSecurityAlert(
+            'login_failed',
+            '【安全告警】管理员多次登录失败触发封禁',
+            `来源 IP: ${ip}\n尝试用户名: ${body.username || 'unknown'}\n连续失败次数: ${failResult.count}\n封禁时长: ${Math.round(failResult.lockDurationMs / 60000)} 分钟`,
+            ip
+          );
+        } else if (failResult.count === settings.notifyLoginFailThreshold) {
+          sendSecurityAlert(
+            'login_failed',
+            '【安全告警】管理员登录连续失败告警',
+            `来源 IP: ${ip}\n尝试用户名: ${body.username || 'unknown'}\n连续失败次数已达阈值: ${failResult.count} 次\n请注意排查是否存在未授权尝试`,
+            ip
+          );
+        }
+      }
       return reply.unauthorized('invalid username or password');
     }
     store.clearLoginFailures(ip);
+    (request as any).audit = { authType: 'login_success', credentialName: config.adminUsername };
+    sendSecurityAlert(
+      'login',
+      '【安全提示】管理员登录成功',
+      `管理员账户: ${config.adminUsername}\n登录 IP: ${ip}\n登录时间: ${new Date().toLocaleString('zh-CN', { hour12: false })}`,
+      ip
+    );
     const sessionId = crypto.randomBytes(32).toString('base64url');
     const expires = new Date(Date.now() + 8 * 60 * 60_000);
     store.createSession(sessionId, expires);
@@ -425,6 +606,7 @@ export async function createApp(config = loadConfig(), services: AppServices = {
   app.get('/admin/api/me', { preHandler: requireAdmin }, async () => ({ username: config.adminUsername }));
 
   app.get('/admin/api/settings', { preHandler: requireAdmin }, async () => {
+    const sec = store.getSecuritySettings();
     return {
       adminUsername: config.adminUsername,
       adminLoginFailLimit: config.adminLoginFailLimit,
@@ -436,7 +618,16 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       wsVersion: config.wsVersion,
       sendTimeoutMs: config.sendTimeoutMs,
       uploadUrl: config.uploadUrl,
-      uploadTimeoutMs: config.uploadTimeoutMs
+      uploadTimeoutMs: config.uploadTimeoutMs,
+      accessLogFormat: sec.accessLogFormat,
+      accessLogRetentionDays: sec.accessLogRetentionDays,
+      notifyOnLogin: sec.notifyOnLogin,
+      notifyOnLoginFailed: sec.notifyOnLoginFailed,
+      notifyOnAuthFailed: sec.notifyOnAuthFailed,
+      notifyUpstreamId: sec.notifyUpstreamId,
+      notifyLoginFailThreshold: sec.notifyLoginFailThreshold,
+      notifyAuthFailThreshold: sec.notifyAuthFailThreshold,
+      notifyAuthFailWindowMin: sec.notifyAuthFailWindowMin
     };
   });
 
@@ -454,6 +645,15 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       sendTimeoutMs?: number;
       uploadUrl?: string;
       uploadTimeoutMs?: number;
+      accessLogFormat?: 'text' | 'json';
+      accessLogRetentionDays?: number;
+      notifyOnLogin?: boolean;
+      notifyOnLoginFailed?: boolean;
+      notifyOnAuthFailed?: boolean;
+      notifyUpstreamId?: number;
+      notifyLoginFailThreshold?: number;
+      notifyAuthFailThreshold?: number;
+      notifyAuthFailWindowMin?: number;
     };
   }>('/admin/api/settings', { preHandler: requireAdmin }, async (request, reply) => {
     const body = request.body ?? {};
@@ -516,8 +716,50 @@ export async function createApp(config = loadConfig(), services: AppServices = {
         return reply.badRequest('CMCC_UPLOAD_TIMEOUT_MS must be 1000-600000');
       }
     }
+    if (body.accessLogFormat !== undefined) {
+      if (body.accessLogFormat !== 'text' && body.accessLogFormat !== 'json') {
+        return reply.badRequest('accessLogFormat must be text or json');
+      }
+    }
+    if (body.accessLogRetentionDays !== undefined) {
+      if (!Number.isInteger(body.accessLogRetentionDays) || body.accessLogRetentionDays < 1) {
+        return reply.badRequest('accessLogRetentionDays must be a positive integer');
+      }
+    }
+    if (body.notifyOnLogin !== undefined && typeof body.notifyOnLogin !== 'boolean') {
+      return reply.badRequest('notifyOnLogin must be boolean');
+    }
+    if (body.notifyOnLoginFailed !== undefined && typeof body.notifyOnLoginFailed !== 'boolean') {
+      return reply.badRequest('notifyOnLoginFailed must be boolean');
+    }
+    if (body.notifyOnAuthFailed !== undefined && typeof body.notifyOnAuthFailed !== 'boolean') {
+      return reply.badRequest('notifyOnAuthFailed must be boolean');
+    }
+    if (body.notifyUpstreamId !== undefined) {
+      if (!Number.isInteger(body.notifyUpstreamId) || body.notifyUpstreamId < 0) {
+        return reply.badRequest('notifyUpstreamId must be an integer >= 0');
+      }
+      if (body.notifyUpstreamId > 0 && !store.getUpstream(body.notifyUpstreamId)) {
+        return reply.badRequest('selected upstream does not exist');
+      }
+    }
+    if (body.notifyLoginFailThreshold !== undefined) {
+      if (!Number.isInteger(body.notifyLoginFailThreshold) || body.notifyLoginFailThreshold < 1) {
+        return reply.badRequest('notifyLoginFailThreshold must be a positive integer');
+      }
+    }
+    if (body.notifyAuthFailThreshold !== undefined) {
+      if (!Number.isInteger(body.notifyAuthFailThreshold) || body.notifyAuthFailThreshold < 1) {
+        return reply.badRequest('notifyAuthFailThreshold must be a positive integer');
+      }
+    }
+    if (body.notifyAuthFailWindowMin !== undefined) {
+      if (!Number.isInteger(body.notifyAuthFailWindowMin) || body.notifyAuthFailWindowMin < 1) {
+        return reply.badRequest('notifyAuthFailWindowMin must be a positive integer');
+      }
+    }
 
-    const envUpdates: Record<string, string | number> = {};
+    const envUpdates: Record<string, string | number | boolean> = {};
 
     if (body.adminUsername !== undefined) {
       config.adminUsername = body.adminUsername.trim();
@@ -569,6 +811,33 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       config.uploadTimeoutMs = body.uploadTimeoutMs;
       envUpdates.CMCC_UPLOAD_TIMEOUT_MS = body.uploadTimeoutMs;
     }
+    if (body.accessLogFormat !== undefined) {
+      envUpdates.ACCESS_LOG_FORMAT = body.accessLogFormat;
+    }
+    if (body.accessLogRetentionDays !== undefined) {
+      envUpdates.ACCESS_LOG_RETENTION_DAYS = body.accessLogRetentionDays;
+    }
+    if (body.notifyOnLogin !== undefined) {
+      envUpdates.NOTIFY_ON_LOGIN = body.notifyOnLogin;
+    }
+    if (body.notifyOnLoginFailed !== undefined) {
+      envUpdates.NOTIFY_ON_LOGIN_FAILED = body.notifyOnLoginFailed;
+    }
+    if (body.notifyOnAuthFailed !== undefined) {
+      envUpdates.NOTIFY_ON_AUTH_FAILED = body.notifyOnAuthFailed;
+    }
+    if (body.notifyUpstreamId !== undefined) {
+      envUpdates.NOTIFY_UPSTREAM_ID = body.notifyUpstreamId;
+    }
+    if (body.notifyLoginFailThreshold !== undefined) {
+      envUpdates.NOTIFY_LOGIN_FAIL_THRESHOLD = body.notifyLoginFailThreshold;
+    }
+    if (body.notifyAuthFailThreshold !== undefined) {
+      envUpdates.NOTIFY_AUTH_FAIL_THRESHOLD = body.notifyAuthFailThreshold;
+    }
+    if (body.notifyAuthFailWindowMin !== undefined) {
+      envUpdates.NOTIFY_AUTH_FAIL_WINDOW_MIN = body.notifyAuthFailWindowMin;
+    }
 
     store.updateBruteForceOptions({
       loginFailLimit: config.adminLoginFailLimit,
@@ -576,10 +845,43 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       loginBanDurationMs: config.adminLoginBanDurationMs
     });
 
+    store.updateSecuritySettings({
+      accessLogFormat: body.accessLogFormat,
+      accessLogRetentionDays: body.accessLogRetentionDays,
+      notifyOnLogin: body.notifyOnLogin,
+      notifyOnLoginFailed: body.notifyOnLoginFailed,
+      notifyOnAuthFailed: body.notifyOnAuthFailed,
+      notifyUpstreamId: body.notifyUpstreamId,
+      notifyLoginFailThreshold: body.notifyLoginFailThreshold,
+      notifyAuthFailThreshold: body.notifyAuthFailThreshold,
+      notifyAuthFailWindowMin: body.notifyAuthFailWindowMin
+    });
+    if (body.accessLogFormat !== undefined) {
+      accessLogger.setFormat(body.accessLogFormat);
+    }
+    if (body.accessLogRetentionDays !== undefined) {
+      accessLogger.startCleanupTimer(body.accessLogRetentionDays);
+    }
+
     updateEnvFile(envUpdates);
 
     return { ok: true };
   });
+
+  app.get('/admin/api/logs/dates', { preHandler: requireAdmin }, async () => {
+    return { dates: accessLogger.listLogDates() };
+  });
+
+  app.get<{ Querystring: { date?: string; page?: string; pageSize?: string; limit?: string } }>(
+    '/admin/api/logs',
+    { preHandler: requireAdmin },
+    async request => {
+      const date = request.query.date?.trim() || accessLogger.getTodayDate();
+      const page = Math.max(1, Number(request.query.page) || 1);
+      const pageSize = Math.max(1, Math.min(Number(request.query.pageSize) || (request.query.limit ? Number(request.query.limit) : 50), 500));
+      return accessLogger.readLogsByDate(date, page, pageSize);
+    }
+  );
 
   app.get('/admin/api/upstreams', { preHandler: requireAdmin }, async () => store.listUpstreams());
   app.post<{ Body: { name?: string; apiKey?: string } }>('/admin/api/upstreams', { preHandler: requireAdmin }, async (request, reply) => {

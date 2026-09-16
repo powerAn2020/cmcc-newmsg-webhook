@@ -1,4 +1,14 @@
-const state = { upstreams: [], credentials: [], history: [] };
+const state = {
+  upstreams: [],
+  credentials: [],
+  history: [],
+  logDates: [],
+  selectedLogDate: '',
+  logPage: 1,
+  logPageSize: 50,
+  logTotal: 0,
+  logTotalPages: 1
+};
 let pendingConfirmation = null;
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
@@ -28,6 +38,17 @@ function renderUpstreams() {
   list.innerHTML = state.upstreams.length ? state.upstreams.map(item => `<div class="data-row"><div><h5>${escapeHtml(item.name)}</h5><p>${escapeHtml(item.apiKeyPreview)}</p></div><button class="delete" data-delete-upstream="${item.id}" type="button">删除</button></div>`).join('') : '<p class="empty-list">尚未添加上游通道。</p>';
   $('#binding-options').innerHTML = state.upstreams.length ? state.upstreams.map(item => `<label class="check-option"><input type="checkbox" name="upstreamIds" value="${item.id}" /><span>${escapeHtml(item.name)}<br /><small>${escapeHtml(item.apiKeyPreview)}</small></span></label>`).join('') : '<p class="empty-list">请先新增并验证一个上游通道。</p>';
   $('#manual-upstream-options').innerHTML = state.upstreams.length ? state.upstreams.map(item => `<label class="check-option"><input type="checkbox" name="manualUpstreamIds" value="${item.id}" /><span>${escapeHtml(item.name)}<br /><small>${escapeHtml(item.apiKeyPreview)}</small></span></label>`).join('') : '<p class="empty-list">请先新增并验证一个上游通道。</p>';
+
+  const notifySelect = $('#notify-upstream-select');
+  if (notifySelect) {
+    const currentVal = notifySelect.value;
+    notifySelect.innerHTML = '<option value="0">全部通道 (广播)</option>' +
+      state.upstreams.map(item => `<option value="${item.id}">${escapeHtml(item.name)} (${escapeHtml(item.apiKeyPreview)})</option>`).join('');
+    if (currentVal !== undefined && currentVal !== '') {
+      notifySelect.value = currentVal;
+    }
+  }
+
   $('#credential-submit').disabled = state.upstreams.length === 0;
   $('#push-submit').disabled = state.upstreams.length === 0;
   $('#upstream-count').textContent = state.upstreams.length;
@@ -45,6 +66,114 @@ function renderHistory() {
   $('#history-empty').hidden = rows.length > 0;
   $('#success-count').textContent = rows.filter(item => item.status === 'success').length;
   $('#failure-count').textContent = rows.filter(item => item.status === 'failed').length;
+}
+
+function renderLogs(data) {
+  const list = $('#logs-list');
+  const empty = $('#logs-empty');
+  const pagination = $('#logs-pagination');
+
+  const items = Array.isArray(data) ? data : (data?.items || []);
+  const total = typeof data?.total === 'number' ? data.total : items.length;
+  const page = typeof data?.page === 'number' ? data.page : 1;
+  const totalPages = typeof data?.totalPages === 'number' ? data.totalPages : 1;
+
+  state.logTotal = total;
+  state.logPage = page;
+  state.logTotalPages = totalPages;
+
+  if (!items.length) {
+    list.innerHTML = '';
+    empty.hidden = false;
+    if (pagination) pagination.hidden = true;
+    return;
+  }
+  empty.hidden = true;
+  if (pagination) pagination.hidden = false;
+
+  // 更新分页信息
+  const totalCountEl = $('#logs-total-count');
+  const currentPageEl = $('#logs-current-page');
+  const totalPagesEl = $('#logs-total-pages');
+  const firstBtn = $('#logs-first-page');
+  const prevBtn = $('#logs-prev-page');
+  const nextBtn = $('#logs-next-page');
+  const lastBtn = $('#logs-last-page');
+
+  if (totalCountEl) totalCountEl.textContent = total;
+  if (currentPageEl) currentPageEl.textContent = page;
+  if (totalPagesEl) totalPagesEl.textContent = totalPages;
+  if (firstBtn) firstBtn.disabled = page <= 1;
+  if (prevBtn) prevBtn.disabled = page <= 1;
+  if (nextBtn) nextBtn.disabled = page >= totalPages;
+  if (lastBtn) lastBtn.disabled = page >= totalPages;
+
+  list.innerHTML = items.map(item => {
+    // 仅在完全无法解析为访问日志结构且包含原始行时做兜底单行显示
+    if (item.raw && !item.method && !item.url) {
+      return `<tr><td colspan="7" style="font-family: monospace; font-size: 12px; white-space: pre-wrap; word-break: break-all;">${escapeHtml(item.raw)}</td></tr>`;
+    }
+    const timeStr = item.timestamp ? new Date(item.timestamp).toLocaleString() : '-';
+    const statusBadge = item.statusCode >= 200 && item.statusCode < 300
+      ? `<span class="badge success">${item.statusCode}</span>`
+      : `<span class="badge failed">${item.statusCode || '-'}</span>`;
+
+    let authDetails = item.authType || 'none';
+    if (item.credentialName) authDetails += ` (${escapeHtml(item.credentialName)})`;
+    if (item.maskedSecret) authDetails += ` [${escapeHtml(item.maskedSecret)}]`;
+    if (item.upstreams && item.upstreams.length) {
+      authDetails += ` → ${escapeHtml(item.upstreams.join(', '))}`;
+    }
+
+    return `<tr>
+      <td>${escapeHtml(timeStr)}</td>
+      <td><code>${escapeHtml(item.ip || '-')}</code></td>
+      <td><strong>${escapeHtml(item.method || '')}</strong> <code>${escapeHtml(item.url || '')}</code></td>
+      <td>${statusBadge}</td>
+      <td>${item.durationMs != null ? `${item.durationMs}ms` : '-'}</td>
+      <td class="content-cell">${escapeHtml(authDetails)}</td>
+      <td class="result">${escapeHtml(item.error || '-')}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function loadLogDates() {
+  const dateSelect = $('#logs-date-select');
+  if (!dateSelect) return;
+  try {
+    const res = await api('/admin/api/logs/dates');
+    state.logDates = res?.dates || [];
+    const today = new Date().toISOString().slice(0, 10);
+    const availableDates = state.logDates.length ? state.logDates : [today];
+
+    const currentSelected = state.selectedLogDate || dateSelect.value;
+    dateSelect.innerHTML = availableDates.map(d => `<option value="${d}">${d}${d === today ? ' (今天)' : ''}</option>`).join('');
+
+    if (currentSelected && availableDates.includes(currentSelected)) {
+      dateSelect.value = currentSelected;
+      state.selectedLogDate = currentSelected;
+    } else {
+      state.selectedLogDate = availableDates[0];
+      dateSelect.value = availableDates[0];
+    }
+  } catch (error) {
+    console.error('Failed to load log dates:', error);
+  }
+}
+
+async function refreshLogs(targetPage) {
+  if (typeof targetPage === 'number') {
+    state.logPage = Math.max(1, targetPage);
+  }
+  const date = state.selectedLogDate || ($('#logs-date-select')?.value) || '';
+  const page = state.logPage || 1;
+  const pageSize = state.logPageSize || 50;
+  try {
+    const data = await api(`/admin/api/logs?date=${encodeURIComponent(date)}&page=${page}&pageSize=${pageSize}`);
+    renderLogs(data);
+  } catch (error) {
+    console.error('Failed to load logs:', error);
+  }
 }
 
 async function refreshAll() {
@@ -67,6 +196,15 @@ async function loadAndPopulateSettings() {
     form.elements.uploadUrl.value = settings.uploadUrl;
     form.elements.sendTimeoutMs.value = settings.sendTimeoutMs;
     form.elements.uploadTimeoutMs.value = settings.uploadTimeoutMs;
+    form.elements.accessLogFormat.value = settings.accessLogFormat || 'text';
+    form.elements.accessLogRetentionDays.value = settings.accessLogRetentionDays ?? 30;
+    form.elements.notifyUpstreamId.value = settings.notifyUpstreamId ?? 0;
+    form.elements.notifyOnLogin.checked = Boolean(settings.notifyOnLogin);
+    form.elements.notifyOnLoginFailed.checked = Boolean(settings.notifyOnLoginFailed);
+    form.elements.notifyOnAuthFailed.checked = Boolean(settings.notifyOnAuthFailed);
+    form.elements.notifyLoginFailThreshold.value = settings.notifyLoginFailThreshold ?? 3;
+    form.elements.notifyAuthFailThreshold.value = settings.notifyAuthFailThreshold ?? 3;
+    form.elements.notifyAuthFailWindowMin.value = settings.notifyAuthFailWindowMin ?? 1;
   } catch (error) {
     showMessage('#settings-message', '加载系统参数失败：' + error.message);
   }
@@ -75,9 +213,11 @@ async function loadAndPopulateSettings() {
 function activateView(name) {
   $$('.nav-item').forEach(button => button.classList.toggle('active', button.dataset.view === name));
   $$('.view').forEach(view => view.classList.toggle('active', view.id === name));
-  $('#page-title').textContent = ({ overview:'概览', upstreams:'上游通道', credentials:'接口鉴权', manual:'手动推送', history:'发送记录', settings:'系统设置' })[name];
+  $('#page-title').textContent = ({ overview:'概览', upstreams:'上游通道', credentials:'接口鉴权', manual:'手动推送', history:'发送记录', logs:'访问日志', settings:'系统设置' })[name] || '概览';
   if (name === 'settings') {
     loadAndPopulateSettings();
+  } else if (name === 'logs') {
+    loadLogDates().then(() => refreshLogs());
   }
 }
 
@@ -293,6 +433,22 @@ document.addEventListener('click', async event => {
 
 $$('.nav-item').forEach(button => button.addEventListener('click', () => activateView(button.dataset.view)));
 $('#refresh-history').addEventListener('click', async () => { state.history = await api('/admin/api/history'); renderHistory(); });
+$('#refresh-logs')?.addEventListener('click', () => refreshLogs());
+$('#logs-date-select')?.addEventListener('change', event => {
+  state.selectedLogDate = event.target.value;
+  state.logPage = 1;
+  refreshLogs();
+});
+$('#logs-page-size')?.addEventListener('change', event => {
+  state.logPageSize = Number(event.target.value) || 50;
+  state.logPage = 1;
+  refreshLogs();
+});
+$('#logs-first-page')?.addEventListener('click', () => refreshLogs(1));
+$('#logs-prev-page')?.addEventListener('click', () => refreshLogs(state.logPage - 1));
+$('#logs-next-page')?.addEventListener('click', () => refreshLogs(state.logPage + 1));
+$('#logs-last-page')?.addEventListener('click', () => refreshLogs(state.logTotalPages));
+
 $('#copy-secret').addEventListener('click', async () => { await navigator.clipboard.writeText($('#created-secret').textContent); $('#copy-secret').textContent = '已复制'; setTimeout(() => { $('#copy-secret').textContent = '复制密钥'; }, 1500); });
 $('#close-secret').addEventListener('click', () => $('#secret-dialog').close());
 $('#secret-dialog').addEventListener('close', () => { $('#created-secret').textContent = ''; $('#copy-secret').textContent = '复制密钥'; });
@@ -326,6 +482,15 @@ $('#settings-form').addEventListener('submit', async event => {
   const uploadUrl = form.elements.uploadUrl.value.trim();
   const sendTimeoutMs = Number(form.elements.sendTimeoutMs.value);
   const uploadTimeoutMs = Number(form.elements.uploadTimeoutMs.value);
+  const accessLogFormat = form.elements.accessLogFormat?.value || 'text';
+  const accessLogRetentionDays = Number(form.elements.accessLogRetentionDays?.value) || 30;
+  const notifyUpstreamId = Number(form.elements.notifyUpstreamId?.value) || 0;
+  const notifyOnLogin = Boolean(form.elements.notifyOnLogin?.checked);
+  const notifyOnLoginFailed = Boolean(form.elements.notifyOnLoginFailed?.checked);
+  const notifyOnAuthFailed = Boolean(form.elements.notifyOnAuthFailed?.checked);
+  const notifyLoginFailThreshold = Number(form.elements.notifyLoginFailThreshold?.value) || 3;
+  const notifyAuthFailThreshold = Number(form.elements.notifyAuthFailThreshold?.value) || 3;
+  const notifyAuthFailWindowMin = Number(form.elements.notifyAuthFailWindowMin?.value) || 1;
 
   if (!adminUsername) {
     showMessage('#settings-message', '管理员用户名不能为空。');
@@ -363,6 +528,22 @@ $('#settings-form').addEventListener('submit', async event => {
     showMessage('#settings-message', '上传超时必须在 1000 至 600000 毫秒之间。');
     return;
   }
+  if (!accessLogRetentionDays || accessLogRetentionDays < 1) {
+    showMessage('#settings-message', '日志保留天数必须是正整数。');
+    return;
+  }
+  if (!notifyLoginFailThreshold || notifyLoginFailThreshold < 1) {
+    showMessage('#settings-message', '登录失败告警阈值必须是正整数。');
+    return;
+  }
+  if (!notifyAuthFailThreshold || notifyAuthFailThreshold < 1) {
+    showMessage('#settings-message', '鉴权失败告警阈值必须是正整数。');
+    return;
+  }
+  if (!notifyAuthFailWindowMin || notifyAuthFailWindowMin < 1) {
+    showMessage('#settings-message', '鉴权观测窗口必须至少为 1 分钟。');
+    return;
+  }
 
   const button = form.querySelector('button[type="submit"]');
   button.disabled = true;
@@ -377,7 +558,16 @@ $('#settings-form').addEventListener('submit', async event => {
       wsVersion,
       sendTimeoutMs,
       uploadUrl,
-      uploadTimeoutMs
+      uploadTimeoutMs,
+      accessLogFormat,
+      accessLogRetentionDays,
+      notifyUpstreamId,
+      notifyOnLogin,
+      notifyOnLoginFailed,
+      notifyOnAuthFailed,
+      notifyLoginFailThreshold,
+      notifyAuthFailThreshold,
+      notifyAuthFailWindowMin
     };
     if (adminPassword) {
       payload.adminPassword = adminPassword;

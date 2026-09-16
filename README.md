@@ -115,6 +115,7 @@ docker run -d \
 | `ADMIN_LOGIN_FAIL_LIMIT` | 否 | `5` | 登录触发封禁的最大连续失败尝试次数 |
 | `ADMIN_LOGIN_FAIL_WINDOW_MIN` | 否 | `15` | 登录失败统计观测窗口（分钟） |
 | `ADMIN_LOGIN_BAN_DURATION_MIN` | 否 | `30` | 登录封禁限制时长（分钟） |
+| `ACCESS_LOG_PATH` | 否 | `./logs/access.log` | 访问审计日志输出文件路径（记录IP、路由、脱敏密钥、状态码与耗时） |
 
 ---
 
@@ -283,3 +284,12 @@ curl -X POST http://localhost:3000/webhook \
 ```bash
 npm test
 ```
+
+---
+
+## 免责声明
+
+- 本项目仅供技术研究、学习交流与个人自用，**不可商用，严禁用于任何商业营利活动**。
+- 请严格遵守中国移动 5G 消息平台（MaaP）服务条款及相关法律法规。
+- 因使用者违规使用或商业化滥用产生的任何法律责任及后果，均由使用者自行承担，与本项目及开发者无关。
+

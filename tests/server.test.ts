@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../src/config.js';
@@ -31,7 +32,8 @@ const config: AppConfig = {
   adminLoginFailWindowMin: 15,
   adminLoginFailWindowMs: 900000,
   adminLoginBanDurationMin: 30,
-  adminLoginBanDurationMs: 1800000
+  adminLoginBanDurationMs: 1800000,
+  accessLogPath: './logs/test-access.log'
 };
 
 describe('admin push API', () => {
@@ -419,6 +421,224 @@ describe('admin push API', () => {
           mediaType: 'IMAGE',
           mediaUrl: 'https://cdn.example/uploaded.txt',
           mediaFileName: 'photo.jpg'
+        })
+      );
+    });
+
+    it('records request access log to file with masked secret and client IP', async () => {
+      const testLogBase = path.resolve('./logs/test-server-access.log');
+      const today = new Date().toISOString().slice(0, 10);
+      const testLog = path.resolve(`./logs/test-server-access-${today}.log`);
+      if (fs.existsSync(testLog)) fs.unlinkSync(testLog);
+      if (fs.existsSync(testLogBase)) fs.unlinkSync(testLogBase);
+
+      const customConfig = { ...config, accessLogPath: testLogBase };
+      const testApp = await createApp(customConfig, { pool, uploader });
+      try {
+        const res = await testApp.inject({
+          method: 'POST',
+          url: '/message?token=tok_testsecret1234',
+          payload: { message: 'hello' }
+        });
+        expect(res.statusCode).toBe(401);
+      } finally {
+        await testApp.close();
+      }
+
+      expect(fs.existsSync(testLog)).toBe(true);
+      const logContent = fs.readFileSync(testLog, 'utf8');
+      expect(logContent).toContain('POST /message?token=tok_testsecret1234');
+      expect(logContent).toContain('AUTH: invalid_gotify_token(key=tok_***1234)');
+      if (fs.existsSync(testLog)) fs.unlinkSync(testLog);
+      if (fs.existsSync(testLogBase)) fs.unlinkSync(testLogBase);
+    });
+
+    it('manages security settings and provides /admin/api/logs endpoint', async () => {
+      // 1. GET settings
+      const settingsRes = await app.inject({
+        method: 'GET',
+        url: '/admin/api/settings',
+        headers: { cookie }
+      });
+      expect(settingsRes.statusCode).toBe(200);
+      const initialSettings = settingsRes.json();
+      expect(initialSettings).toHaveProperty('accessLogFormat', 'text');
+      expect(initialSettings).toHaveProperty('notifyOnLogin', false);
+      expect(initialSettings).toHaveProperty('notifyOnLoginFailed', false);
+      expect(initialSettings).toHaveProperty('notifyOnAuthFailed', false);
+
+      // 2. POST settings
+      const updateRes = await app.inject({
+        method: 'POST',
+        url: '/admin/api/settings',
+        headers: { cookie },
+        payload: {
+          accessLogFormat: 'json',
+          notifyOnLogin: true,
+          notifyOnLoginFailed: true,
+          notifyOnAuthFailed: true,
+          notifyUpstreamId: 1,
+          notifyLoginFailThreshold: 2,
+          notifyAuthFailThreshold: 2,
+          notifyAuthFailWindowMin: 1
+        }
+      });
+      expect(updateRes.statusCode).toBe(200);
+
+      // 3. Verify settings updated
+      const updatedSettings = (await app.inject({
+        method: 'GET',
+        url: '/admin/api/settings',
+        headers: { cookie }
+      })).json();
+      expect(updatedSettings.accessLogFormat).toBe('json');
+      expect(updatedSettings.notifyOnLogin).toBe(true);
+      expect(updatedSettings.notifyOnLoginFailed).toBe(true);
+      expect(updatedSettings.notifyOnAuthFailed).toBe(true);
+      expect(updatedSettings.notifyUpstreamId).toBe(1);
+      expect(updatedSettings.notifyLoginFailThreshold).toBe(2);
+      expect(updatedSettings.notifyAuthFailThreshold).toBe(2);
+      expect(updatedSettings.notifyAuthFailWindowMin).toBe(1);
+
+      // 4. GET /admin/api/logs
+      const logsRes = await app.inject({
+        method: 'GET',
+        url: '/admin/api/logs?limit=50',
+        headers: { cookie }
+      });
+      expect(logsRes.statusCode).toBe(200);
+      const logsData = logsRes.json();
+      expect(logsData).toHaveProperty('items');
+      expect(logsData).toHaveProperty('format', 'json');
+      expect(Array.isArray(logsData.items)).toBe(true);
+    });
+
+    it('triggers security alerts to upstream on login success, brute force lock, and auth failure', async () => {
+      // Enable all security alerts with threshold = 2
+      await app.inject({
+        method: 'POST',
+        url: '/admin/api/settings',
+        headers: { cookie },
+        payload: {
+          notifyOnLogin: true,
+          notifyOnLoginFailed: true,
+          notifyOnAuthFailed: true,
+          notifyUpstreamId: 1,
+          notifyLoginFailThreshold: 2,
+          notifyAuthFailThreshold: 2,
+          notifyAuthFailWindowMin: 1
+        }
+      });
+
+      pool.send.mockClear();
+
+      // Test 1: Login success alert
+      const loginRes = await app.inject({
+        method: 'POST',
+        url: '/admin/api/login',
+        payload: { username: 'admin', password: 'password' }
+      });
+      expect(loginRes.statusCode).toBe(200);
+
+      // Wait a tick for async notification delivery
+      await new Promise(r => setTimeout(r, 50));
+      expect(pool.send).toHaveBeenCalledWith(
+        { apiKey: 'ak_primary' },
+        expect.objectContaining({
+          type: 'send',
+          content: expect.stringContaining('【安全提示】管理员登录成功')
+        })
+      );
+
+      // Check history records system notification
+      const histRes = await app.inject({
+        method: 'GET',
+        url: '/admin/api/history',
+        headers: { cookie }
+      });
+      const historyItems = histRes.json();
+      const loginHistory = historyItems.find((h: any) => h.source === 'system' && h.title?.includes('管理员登录成功'));
+      expect(loginHistory).toBeDefined();
+      expect(loginHistory.status).toBe('success');
+
+      pool.send.mockClear();
+
+      // Test 2: Auth failure alert with threshold = 2
+      // Attempt 1: Below threshold (1 < 2) -> no alert
+      await app.inject({
+        method: 'POST',
+        url: '/message?token=invalid_alert_tok_1',
+        payload: { message: 'should fail 1' }
+      });
+      await new Promise(r => setTimeout(r, 50));
+      expect(pool.send).not.toHaveBeenCalled();
+
+      // Attempt 2: Reaches threshold (2 >= 2) -> triggers alert
+      await app.inject({
+        method: 'POST',
+        url: '/message?token=invalid_alert_tok_2',
+        payload: { message: 'should fail 2' }
+      });
+      await new Promise(r => setTimeout(r, 50));
+      expect(pool.send).toHaveBeenCalledWith(
+        { apiKey: 'ak_primary' },
+        expect.objectContaining({
+          type: 'send',
+          content: expect.stringContaining('【安全预警】未授权接口访问拦截')
+        })
+      );
+
+      pool.send.mockClear();
+
+      // Test 3: Multiple login failure alert with threshold = 2 and limit = 5
+      // Attempt 1: count 1 -> no alert
+      await app.inject({
+        method: 'POST',
+        url: '/admin/api/login',
+        payload: { username: 'admin', password: 'wrongpassword' }
+      });
+      expect(pool.send).not.toHaveBeenCalled();
+
+      // Attempt 2: count 2 -> reaches threshold 2 -> triggers warning alert
+      await app.inject({
+        method: 'POST',
+        url: '/admin/api/login',
+        payload: { username: 'admin', password: 'wrongpassword' }
+      });
+      await new Promise(r => setTimeout(r, 50));
+      expect(pool.send).toHaveBeenCalledWith(
+        { apiKey: 'ak_primary' },
+        expect.objectContaining({
+          type: 'send',
+          content: expect.stringContaining('【安全告警】管理员登录连续失败告警')
+        })
+      );
+
+      pool.send.mockClear();
+
+      // Attempt 3 & 4: count 3, 4 -> no duplicate alert before lockout
+      for (let i = 0; i < 2; i++) {
+        await app.inject({
+          method: 'POST',
+          url: '/admin/api/login',
+          payload: { username: 'admin', password: 'wrongpassword' }
+        });
+      }
+      expect(pool.send).not.toHaveBeenCalled();
+
+      // Attempt 5: count 5 -> triggers lockout alert
+      const lockRes = await app.inject({
+        method: 'POST',
+        url: '/admin/api/login',
+        payload: { username: 'admin', password: 'wrongpassword' }
+      });
+      expect(lockRes.statusCode).toBe(401);
+      await new Promise(r => setTimeout(r, 50));
+      expect(pool.send).toHaveBeenCalledWith(
+        { apiKey: 'ak_primary' },
+        expect.objectContaining({
+          type: 'send',
+          content: expect.stringContaining('【安全告警】管理员多次登录失败触发封禁')
         })
       );
     });

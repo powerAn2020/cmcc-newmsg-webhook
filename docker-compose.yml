@@ -11,5 +11,6 @@ services:
       - .env
     volumes:
       - ./data:/app/data
+      - ./logs:/app/logs
     environment:
       - TZ=Asia/Shanghai

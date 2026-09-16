@@ -39,6 +39,16 @@ export interface AppConfig {
   adminLoginFailWindowMs: number;
   adminLoginBanDurationMin: number;
   adminLoginBanDurationMs: number;
+  accessLogPath: string;
+  accessLogFormat: 'text' | 'json';
+  accessLogRetentionDays: number;
+  notifyOnLogin: boolean;
+  notifyOnLoginFailed: boolean;
+  notifyOnAuthFailed: boolean;
+  notifyUpstreamId: number;
+  notifyLoginFailThreshold: number;
+  notifyAuthFailThreshold: number;
+  notifyAuthFailWindowMin: number;
 }
 
 export function loadConfig(): AppConfig {
@@ -94,6 +104,16 @@ export function loadConfig(): AppConfig {
   }
   const adminLoginBanDurationMs = adminLoginBanDurationMin * 60_000;
 
+  const accessLogFormat = process.env.ACCESS_LOG_FORMAT === 'json' ? 'json' : 'text';
+  const accessLogRetentionDays = Math.max(1, Number(process.env.ACCESS_LOG_RETENTION_DAYS ?? 7) || 7);
+  const notifyOnLogin = process.env.NOTIFY_ON_LOGIN === 'true';
+  const notifyOnLoginFailed = process.env.NOTIFY_ON_LOGIN_FAILED === 'true';
+  const notifyOnAuthFailed = process.env.NOTIFY_ON_AUTH_FAILED === 'true';
+  const notifyUpstreamId = Number(process.env.NOTIFY_UPSTREAM_ID ?? 0) || 0;
+  const notifyLoginFailThreshold = Math.max(1, Number(process.env.NOTIFY_LOGIN_FAIL_THRESHOLD ?? 3) || 3);
+  const notifyAuthFailThreshold = Math.max(1, Number(process.env.NOTIFY_AUTH_FAIL_THRESHOLD ?? 3) || 3);
+  const notifyAuthFailWindowMin = Math.max(1, Number(process.env.NOTIFY_AUTH_FAIL_WINDOW_MIN ?? 1) || 1);
+
   return {
     host: process.env.HOST ?? '0.0.0.0',
     port,
@@ -113,7 +133,17 @@ export function loadConfig(): AppConfig {
     adminLoginFailWindowMin,
     adminLoginFailWindowMs,
     adminLoginBanDurationMin,
-    adminLoginBanDurationMs
+    adminLoginBanDurationMs,
+    accessLogPath: process.env.ACCESS_LOG_PATH ?? './logs/access.log',
+    accessLogFormat,
+    accessLogRetentionDays,
+    notifyOnLogin,
+    notifyOnLoginFailed,
+    notifyOnAuthFailed,
+    notifyUpstreamId,
+    notifyLoginFailThreshold,
+    notifyAuthFailThreshold,
+    notifyAuthFailWindowMin
   };
 }
 
@@ -121,7 +151,7 @@ export function maskSecret(value: string): string {
   return value.length <= 6 ? '***' : `${value.slice(0, 3)}***${value.slice(-3)}`;
 }
 
-export function updateEnvFile(updates: Record<string, string | number>) {
+export function updateEnvFile(updates: Record<string, string | number | boolean>) {
   const envPath = '.env';
   if (!fs.existsSync(envPath)) {
     const content = Object.entries(updates).map(([k, v]) => `${k}=${v}`).join('\n') + '\n';

@@ -30,7 +30,7 @@ export interface CredentialSummary {
 export interface HistoryEntry {
   id: number;
   createdAt: string;
-  source: CredentialKind | 'manual';
+  source: CredentialKind | 'manual' | 'system';
   credentialName: string | null;
   upstreamName: string | null;
   status: 'success' | 'failed';

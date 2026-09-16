@@ -59,6 +59,9 @@ export class Store {
         title TEXT, content TEXT, media_type TEXT, message_id TEXT, error TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_history_created_at ON notification_history(created_at DESC);
+      CREATE TABLE IF NOT EXISTS system_settings (
+        key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
     `);
   }
 
@@ -172,14 +175,69 @@ export class Store {
     if (options.loginFailWindowMs !== undefined) this.loginFailWindowMs = options.loginFailWindowMs;
     if (options.loginBanDurationMs !== undefined) this.loginBanDurationMs = options.loginBanDurationMs;
   }
-  recordLoginFailure(ip: string) {
+  recordLoginFailure(ip: string): { count: number; locked: boolean; lockDurationMs: number } {
     const row = this.db.prepare('SELECT * FROM login_attempts WHERE ip = ?').get(ip) as { failed_count: number; first_failed_at: string } | undefined;
     const first = row && Date.now() - Date.parse(row.first_failed_at) < this.loginFailWindowMs ? row.first_failed_at : now();
     const count = first === row?.first_failed_at ? row.failed_count + 1 : 1;
-    const lock = count >= this.loginFailLimit ? new Date(Date.now() + this.loginBanDurationMs).toISOString() : null;
+    const locked = count >= this.loginFailLimit;
+    const lock = locked ? new Date(Date.now() + this.loginBanDurationMs).toISOString() : null;
     this.db.prepare(`INSERT INTO login_attempts (ip, failed_count, first_failed_at, locked_until) VALUES (?, ?, ?, ?)
       ON CONFLICT(ip) DO UPDATE SET failed_count = excluded.failed_count, first_failed_at = excluded.first_failed_at, locked_until = excluded.locked_until`).run(ip, count, first, lock);
+    return { count, locked, lockDurationMs: this.loginBanDurationMs };
   }
   clearLoginFailures(ip: string) { this.db.prepare('DELETE FROM login_attempts WHERE ip = ?').run(ip); }
+
+  getSetting(key: string, defaultValue = ''): string {
+    const row = this.db.prepare('SELECT value FROM system_settings WHERE key = ?').get(key) as { value: string } | undefined;
+    return row ? row.value : defaultValue;
+  }
+
+  setSetting(key: string, value: string): void {
+    const time = now();
+    this.db.prepare(`
+      INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `).run(key, value, time);
+  }
+
+  getSecuritySettings(): SecurityAlertSettings {
+    return {
+      accessLogFormat: this.getSetting('accessLogFormat', 'text') === 'json' ? 'json' : 'text',
+      accessLogRetentionDays: Math.max(1, Number(this.getSetting('accessLogRetentionDays', '30')) || 30),
+      notifyOnLogin: this.getSetting('notifyOnLogin', 'false') === 'true',
+      notifyOnLoginFailed: this.getSetting('notifyOnLoginFailed', 'false') === 'true',
+      notifyOnAuthFailed: this.getSetting('notifyOnAuthFailed', 'false') === 'true',
+      notifyUpstreamId: Number(this.getSetting('notifyUpstreamId', '0')) || 0,
+      notifyLoginFailThreshold: Math.max(1, Number(this.getSetting('notifyLoginFailThreshold', '3')) || 3),
+      notifyAuthFailThreshold: Math.max(1, Number(this.getSetting('notifyAuthFailThreshold', '3')) || 3),
+      notifyAuthFailWindowMin: Math.max(1, Number(this.getSetting('notifyAuthFailWindowMin', '1')) || 1)
+    };
+  }
+
+  updateSecuritySettings(settings: Partial<SecurityAlertSettings>): void {
+    if (settings.accessLogFormat !== undefined) this.setSetting('accessLogFormat', settings.accessLogFormat);
+    if (settings.accessLogRetentionDays !== undefined) this.setSetting('accessLogRetentionDays', String(settings.accessLogRetentionDays));
+    if (settings.notifyOnLogin !== undefined) this.setSetting('notifyOnLogin', String(settings.notifyOnLogin));
+    if (settings.notifyOnLoginFailed !== undefined) this.setSetting('notifyOnLoginFailed', String(settings.notifyOnLoginFailed));
+    if (settings.notifyOnAuthFailed !== undefined) this.setSetting('notifyOnAuthFailed', String(settings.notifyOnAuthFailed));
+    if (settings.notifyUpstreamId !== undefined) this.setSetting('notifyUpstreamId', String(settings.notifyUpstreamId));
+    if (settings.notifyLoginFailThreshold !== undefined) this.setSetting('notifyLoginFailThreshold', String(settings.notifyLoginFailThreshold));
+    if (settings.notifyAuthFailThreshold !== undefined) this.setSetting('notifyAuthFailThreshold', String(settings.notifyAuthFailThreshold));
+    if (settings.notifyAuthFailWindowMin !== undefined) this.setSetting('notifyAuthFailWindowMin', String(settings.notifyAuthFailWindowMin));
+  }
+
   close() { this.db.close(); }
 }
+
+export interface SecurityAlertSettings {
+  accessLogFormat: 'text' | 'json';
+  accessLogRetentionDays: number;
+  notifyOnLogin: boolean;
+  notifyOnLoginFailed: boolean;
+  notifyOnAuthFailed: boolean;
+  notifyUpstreamId: number;
+  notifyLoginFailThreshold: number;
+  notifyAuthFailThreshold: number;
+  notifyAuthFailWindowMin: number;
+}
+

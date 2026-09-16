@@ -14,8 +14,8 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/public ./public
-RUN mkdir /app/data && chown -R node:node /app
+RUN mkdir -p /app/data /app/logs && chown -R node:node /app
 USER node
 EXPOSE 3000
-VOLUME ["/app/data"]
+VOLUME ["/app/data", "/app/logs"]
 CMD ["node", "dist/server.js"]

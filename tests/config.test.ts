@@ -102,4 +102,13 @@ describe('configuration', () => {
     process.env.ADMIN_LOGIN_BAN_DURATION_MIN = '0';
     expect(loadConfig).toThrow('ADMIN_LOGIN_BAN_DURATION_MIN');
   });
+
+  it('loads default accessLogPath or custom environment variable', () => {
+    delete process.env.ACCESS_LOG_PATH;
+    expect(loadConfig().accessLogPath).toBe('./logs/access.log');
+
+    process.env.ACCESS_LOG_PATH = './custom/access.log';
+    expect(loadConfig().accessLogPath).toBe('./custom/access.log');
+    delete process.env.ACCESS_LOG_PATH;
+  });
 });

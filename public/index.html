@@ -24,6 +24,7 @@
           <label>密码 <span class="required">*</span><input name="password" type="password" autocomplete="current-password" required /></label>
           <p id="login-error" class="form-message" role="alert"></p>
           <button class="button primary" type="submit">登录</button>
+          <p class="login-disclaimer">免责声明：不可商用，仅用于个人学习自用</p>
         </form>
       </section>
     </main>
@@ -37,6 +38,7 @@
           <button class="nav-item" data-view="credentials">接口鉴权</button>
           <button class="nav-item" data-view="manual">手动推送</button>
           <button class="nav-item" data-view="history">发送记录</button>
+          <button class="nav-item" data-view="logs">访问日志</button>
           <button class="nav-item" data-view="settings">系统设置</button>
         </nav>
         <div class="sidebar-footer"><span id="operator-name"></span><button id="logout-button" class="text-button" type="button">退出登录</button></div>
@@ -79,6 +81,62 @@
         <section id="history" class="view" aria-labelledby="history-title">
           <div class="section-heading history-heading"><div><p class="eyebrow">DELIVERY HISTORY</p><h3 id="history-title">发送记录</h3><p>每个绑定上游都会生成独立记录，最多显示最近 500 条。</p></div><button id="refresh-history" class="button secondary" type="button">刷新记录</button></div>
           <article class="history-panel"><div class="history-table-wrap"><table><thead><tr><th>时间</th><th>入口</th><th>上游通道</th><th>内容</th><th>状态</th><th>结果</th></tr></thead><tbody id="history-list"></tbody></table></div><p id="history-empty" class="empty-state" hidden>暂无发送记录。</p></article>
+        </section>
+
+        <section id="logs" class="view" aria-labelledby="logs-title">
+          <div class="section-heading history-heading">
+            <div>
+              <p class="eyebrow">ACCESS AUDIT</p>
+              <h3 id="logs-title">访问日志</h3>
+              <p>实时记录 HTTP 请求访问、耗时、IP 及凭据鉴权信息（已支持按日拆分与单日分页浏览）。</p>
+            </div>
+            <div class="log-toolbar">
+              <label style="margin:0; font-size: 13px; display: inline-flex; align-items: center; gap: 6px;">
+                <span>日志日期：</span>
+                <select id="logs-date-select" class="log-select"></select>
+              </label>
+              <button id="refresh-logs" class="button secondary" type="button">刷新日志</button>
+            </div>
+          </div>
+          <article class="history-panel">
+            <div class="history-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>客户端 IP</th>
+                    <th>请求端点</th>
+                    <th>状态码</th>
+                    <th>响应耗时</th>
+                    <th>鉴权与通道详情</th>
+                    <th>错误说明</th>
+                  </tr>
+                </thead>
+                <tbody id="logs-list"></tbody>
+              </table>
+            </div>
+            <p id="logs-empty" class="empty-state" hidden>暂无访问日志记录。</p>
+            <div id="logs-pagination" class="pagination-bar" hidden>
+              <div class="pagination-info">
+                <span>共 <strong id="logs-total-count">0</strong> 条记录</span>
+                <span>第 <strong id="logs-current-page">1</strong> / <span id="logs-total-pages">1</span> 页</span>
+                <label style="margin:0; font-size:12px; display:inline-flex; align-items:center; gap:4px;">
+                  每页
+                  <select id="logs-page-size" style="min-height:28px; width:auto; padding:2px 6px; font-size:12px;">
+                    <option value="20">20 条</option>
+                    <option value="50" selected>50 条</option>
+                    <option value="100">100 条</option>
+                  </select>
+                </label>
+              </div>
+              <div class="pagination-actions">
+                <button id="logs-first-page" class="pagination-btn" type="button">首页</button>
+                <button id="logs-prev-page" class="pagination-btn" type="button">上一页</button>
+                <button id="logs-next-page" class="pagination-btn" type="button">下一页</button>
+                <button id="logs-last-page" class="pagination-btn" type="button">末页</button>
+              </div>
+            </div>
+          </article>
         </section>
 
         <section id="settings" class="view" aria-labelledby="settings-title">
@@ -161,6 +219,67 @@
                 </div>
               </fieldset>
 
+              <fieldset style="border: 1px solid var(--line); border-radius: 6px; padding: 20px; background: rgba(0,0,0,0.01);">
+                <legend style="font-weight: bold; padding: 0 10px; color: #126d68;">安全告警与访问日志设置</legend>
+                <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; margin-top: 10px;">
+                  <label>
+                    日志落盘格式 <span class="required">*</span>
+                    <select name="accessLogFormat">
+                      <option value="text">纯文本格式 (标准排版)</option>
+                      <option value="json">单行 JSON (NDJSON)</option>
+                    </select>
+                    <span class="help-text">日志文件的落盘记录格式</span>
+                  </label>
+                  <label>
+                    日志保留天数 (天) <span class="required">*</span>
+                    <input name="accessLogRetentionDays" type="number" min="1" max="3650" step="1" required />
+                    <span class="help-text">超过该天数的日志文件将自动清理（默认：30 天）</span>
+                  </label>
+                  <label>
+                    告警推送目标通道 <span class="required">*</span>
+                    <select name="notifyUpstreamId" id="notify-upstream-select">
+                      <option value="0">全部通道 (广播)</option>
+                    </select>
+                    <span class="help-text">安全事件推送至哪个上游网关</span>
+                  </label>
+                </div>
+                <div style="margin-top: 20px;">
+                  <span style="font-size: 13px; font-weight: 600; display: block; margin-bottom: 10px; color: var(--text-heading);">推送事件开关</span>
+                  <div style="display: flex; flex-wrap: wrap; gap: 24px;">
+                    <label class="checkbox-inline">
+                      <input type="checkbox" name="notifyOnLogin" />
+                      <span>管理员登录成功提示</span>
+                    </label>
+                    <label class="checkbox-inline">
+                      <input type="checkbox" name="notifyOnLoginFailed" />
+                      <span>多次登录失败封禁告警</span>
+                    </label>
+                    <label class="checkbox-inline">
+                      <input type="checkbox" name="notifyOnAuthFailed" />
+                      <span>未授权接口访问拦截告警</span>
+                    </label>
+                  </div>
+                </div>
+
+                <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; margin-top: 24px; padding-top: 18px; border-top: 1px dashed var(--line);">
+                  <label>
+                    登录失败告警阈值 (次) <span class="required">*</span>
+                    <input name="notifyLoginFailThreshold" type="number" min="1" step="1" required />
+                    <span class="help-text">连续失败达此次数触发告警（默认：3 次）</span>
+                  </label>
+                  <label>
+                    鉴权失败告警阈值 (次) <span class="required">*</span>
+                    <input name="notifyAuthFailThreshold" type="number" min="1" step="1" required />
+                    <span class="help-text">窗口内拦截达此次数触发告警（默认：3 次）</span>
+                  </label>
+                  <label>
+                    鉴权观测窗口 (分钟) <span class="required">*</span>
+                    <input name="notifyAuthFailWindowMin" type="number" min="1" step="1" required />
+                    <span class="help-text">鉴权失败统计时间窗口（默认：1 分钟）</span>
+                  </label>
+                </div>
+              </fieldset>
+
               <div>
                 <p id="settings-message" class="form-message" role="status"></p>
                 <button class="button primary" type="submit" style="width: auto; padding: 10px 28px;">保存系统设置</button>
@@ -168,6 +287,9 @@
             </form>
           </article>
         </section>
+        <footer class="workspace-footer">
+          <p>免责声明：不可商用，仅用于个人学习自用</p>
+        </footer>
       </section>
     </main>
     <dialog id="secret-dialog" aria-labelledby="secret-dialog-title">
