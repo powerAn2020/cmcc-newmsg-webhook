@@ -111,4 +111,27 @@ describe('configuration', () => {
     expect(loadConfig().accessLogPath).toBe('./custom/access.log');
     delete process.env.ACCESS_LOG_PATH;
   });
+
+  it('loads database configurations and handles database type parsing', () => {
+    delete process.env.DB_TYPE;
+    delete process.env.DATABASE_URL;
+    const defaultCfg = loadConfig();
+    expect(defaultCfg.databaseType).toBe('sqlite');
+    expect(defaultCfg.databaseUrl).toBeUndefined();
+
+    process.env.DB_TYPE = 'postgres';
+    process.env.DATABASE_URL = 'postgres://user:pass@localhost:5432/testdb';
+    const pgCfg = loadConfig();
+    expect(pgCfg.databaseType).toBe('postgres');
+    expect(pgCfg.databaseUrl).toBe('postgres://user:pass@localhost:5432/testdb');
+
+    process.env.DB_TYPE = 'mysql';
+    process.env.DATABASE_URL = 'mysql://user:pass@localhost:3306/testdb';
+    const mysqlCfg = loadConfig();
+    expect(mysqlCfg.databaseType).toBe('mysql');
+    expect(mysqlCfg.databaseUrl).toBe('mysql://user:pass@localhost:3306/testdb');
+
+    delete process.env.DB_TYPE;
+    delete process.env.DATABASE_URL;
+  });
 });

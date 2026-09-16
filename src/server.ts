@@ -16,7 +16,7 @@ import { loadConfig, maskSecret, updateEnvFile, type AppConfig } from './config.
 import { CmccClientPool } from './cmcc-client.js';
 import { CmccUploader } from './cmcc-upload.js';
 import { downloadRemoteMedia, inferMediaType, isCmccMediaUrl, MAX_MEDIA_BYTES, validateMedia, type StagedMediaFile } from './media.js';
-import { Store, type IStore } from './store.js';
+import { Store, createStore, type IStore } from './store.js';
 import { chunkText, markdownToPlainText } from './text.js';
 import type { CmccAccount, CredentialKind, GotifyRequest, MediaType, NativeSendRequest } from './types.js';
 import { AccessLogger, maskSecretKey } from './logger.js';
@@ -179,36 +179,46 @@ export async function createApp(config = loadConfig(), services: AppServices = {
   await app.register(sensible);
   await app.register(fastifyStatic, { root: publicRoot, prefix: '/', index: ['index.html'] });
 
-  const store = services.store ?? new Store(config.databasePath, config.encryptionKey, {
+  const store = services.store ?? await createStore({
+    type: config.databaseType,
+    databasePath: config.databasePath,
+    url: config.databaseUrl,
+    host: config.databaseHost,
+    port: config.databasePort,
+    user: config.databaseUser,
+    password: config.databasePassword,
+    database: config.databaseName,
+    ssl: config.databaseSsl,
+    encryptionKey: config.encryptionKey,
     loginFailLimit: config.adminLoginFailLimit,
     loginFailWindowMs: config.adminLoginFailWindowMs,
     loginBanDurationMs: config.adminLoginBanDurationMs
   });
-  if (!store.getSetting('accessLogFormat')) store.setSetting('accessLogFormat', config.accessLogFormat);
-  if (!store.getSetting('accessLogRetentionDays')) store.setSetting('accessLogRetentionDays', String(config.accessLogRetentionDays));
-  if (!store.getSetting('notifyOnLogin')) store.setSetting('notifyOnLogin', String(config.notifyOnLogin));
-  if (!store.getSetting('notifyOnLoginFailed')) store.setSetting('notifyOnLoginFailed', String(config.notifyOnLoginFailed));
-  if (!store.getSetting('notifyOnAuthFailed')) store.setSetting('notifyOnAuthFailed', String(config.notifyOnAuthFailed));
-  if (!store.getSetting('notifyUpstreamId')) store.setSetting('notifyUpstreamId', String(config.notifyUpstreamId));
-  if (!store.getSetting('notifyLoginFailThreshold')) store.setSetting('notifyLoginFailThreshold', String(config.notifyLoginFailThreshold));
-  if (!store.getSetting('notifyAuthFailThreshold')) store.setSetting('notifyAuthFailThreshold', String(config.notifyAuthFailThreshold));
-  if (!store.getSetting('notifyAuthFailWindowMin')) store.setSetting('notifyAuthFailWindowMin', String(config.notifyAuthFailWindowMin));
-  if (!store.getSetting('rateLimitPhoneMinIntervalSec')) store.setSetting('rateLimitPhoneMinIntervalSec', String(config.rateLimitPhoneMinIntervalSec));
-  if (!store.getSetting('rateLimitPhoneHourMax')) store.setSetting('rateLimitPhoneHourMax', String(config.rateLimitPhoneHourMax));
-  if (!store.getSetting('rateLimitPhoneDayMax')) store.setSetting('rateLimitPhoneDayMax', String(config.rateLimitPhoneDayMax));
-  if (!store.getSetting('rateLimitIpMinMax')) store.setSetting('rateLimitIpMinMax', String(config.rateLimitIpMinMax));
-  if (!store.getSetting('rateLimitDuplicateWindowSec')) store.setSetting('rateLimitDuplicateWindowSec', String(config.rateLimitDuplicateWindowSec));
-  if (!store.getSetting('notifyOnRateLimit')) store.setSetting('notifyOnRateLimit', String(config.notifyOnRateLimit));
+  if (!(await store.getSetting('accessLogFormat'))) await store.setSetting('accessLogFormat', config.accessLogFormat);
+  if (!(await store.getSetting('accessLogRetentionDays'))) await store.setSetting('accessLogRetentionDays', String(config.accessLogRetentionDays));
+  if (!(await store.getSetting('notifyOnLogin'))) await store.setSetting('notifyOnLogin', String(config.notifyOnLogin));
+  if (!(await store.getSetting('notifyOnLoginFailed'))) await store.setSetting('notifyOnLoginFailed', String(config.notifyOnLoginFailed));
+  if (!(await store.getSetting('notifyOnAuthFailed'))) await store.setSetting('notifyOnAuthFailed', String(config.notifyOnAuthFailed));
+  if (!(await store.getSetting('notifyUpstreamId'))) await store.setSetting('notifyUpstreamId', String(config.notifyUpstreamId));
+  if (!(await store.getSetting('notifyLoginFailThreshold'))) await store.setSetting('notifyLoginFailThreshold', String(config.notifyLoginFailThreshold));
+  if (!(await store.getSetting('notifyAuthFailThreshold'))) await store.setSetting('notifyAuthFailThreshold', String(config.notifyAuthFailThreshold));
+  if (!(await store.getSetting('notifyAuthFailWindowMin'))) await store.setSetting('notifyAuthFailWindowMin', String(config.notifyAuthFailWindowMin));
+  if (!(await store.getSetting('rateLimitPhoneMinIntervalSec'))) await store.setSetting('rateLimitPhoneMinIntervalSec', String(config.rateLimitPhoneMinIntervalSec));
+  if (!(await store.getSetting('rateLimitPhoneHourMax'))) await store.setSetting('rateLimitPhoneHourMax', String(config.rateLimitPhoneHourMax));
+  if (!(await store.getSetting('rateLimitPhoneDayMax'))) await store.setSetting('rateLimitPhoneDayMax', String(config.rateLimitPhoneDayMax));
+  if (!(await store.getSetting('rateLimitIpMinMax'))) await store.setSetting('rateLimitIpMinMax', String(config.rateLimitIpMinMax));
+  if (!(await store.getSetting('rateLimitDuplicateWindowSec'))) await store.setSetting('rateLimitDuplicateWindowSec', String(config.rateLimitDuplicateWindowSec));
+  if (!(await store.getSetting('notifyOnRateLimit'))) await store.setSetting('notifyOnRateLimit', String(config.notifyOnRateLimit));
   const cache = services.cache ?? createCacheService();
   const rateLimiter = services.rateLimiter ?? new MessageRateLimiter(cache);
   const pool = services.pool ?? new CmccClientPool(config.wsUrl, config.wsVersion, config.sendTimeoutMs);
   const uploader = services.uploader ?? new CmccUploader(config.uploadUrl, config.uploadTimeoutMs);
-  const securitySettings = store.getSecuritySettings();
+  const securitySettings = await store.getSecuritySettings();
   const accessLogger = services.accessLogger ?? new AccessLogger(config.accessLogPath, securitySettings.accessLogFormat);
   accessLogger.startCleanupTimer(securitySettings.accessLogRetentionDays);
   app.addHook('onClose', async () => {
     pool.close();
-    store.close();
+    await store.close();
     await accessLogger.close();
     await cache.close();
   });
@@ -222,7 +232,7 @@ export async function createApp(config = loadConfig(), services: AppServices = {
     ip: string
   ) {
     try {
-      const settings = store.getSecuritySettings();
+      const settings = await store.getSecuritySettings();
       if (type === 'login' && !settings.notifyOnLogin) return;
       if (type === 'login_failed' && !settings.notifyOnLoginFailed) return;
       if (type === 'auth_failed' && !settings.notifyOnAuthFailed) return;
@@ -230,13 +240,12 @@ export async function createApp(config = loadConfig(), services: AppServices = {
 
       let targets: { id: number; apiKey: string }[] = [];
       if (settings.notifyUpstreamId > 0) {
-        const up = store.getUpstream(settings.notifyUpstreamId);
+        const up = await store.getUpstream(settings.notifyUpstreamId);
         if (up) targets = [up];
       } else {
-        const all = store.listUpstreams();
-        targets = all
-          .map(item => store.getUpstream(item.id))
-          .filter(Boolean) as { id: number; apiKey: string }[];
+        const all = await store.listUpstreams();
+        const loaded = await Promise.all(all.map(item => store.getUpstream(item.id)));
+        targets = loaded.filter(Boolean) as { id: number; apiKey: string }[];
       }
 
       if (targets.length === 0) return;
@@ -247,8 +256,8 @@ export async function createApp(config = loadConfig(), services: AppServices = {
           type: 'send',
           content: fullContent,
           timestamp: Date.now()
-        }).then(messageId => {
-          store.addHistory({
+        }).then(async messageId => {
+          await store.addHistory({
             source: 'system',
             upstreamId: upstream.id,
             status: 'success',
@@ -258,8 +267,8 @@ export async function createApp(config = loadConfig(), services: AppServices = {
             messageId,
             error: null
           });
-        }).catch(err => {
-          store.addHistory({
+        }).catch(async err => {
+          await store.addHistory({
             source: 'system',
             upstreamId: upstream.id,
             status: 'failed',
@@ -299,7 +308,7 @@ export async function createApp(config = loadConfig(), services: AppServices = {
     });
 
     if (reply.statusCode === 401 && audit?.authType?.startsWith('invalid_')) {
-      const settings = store.getSecuritySettings();
+      const settings = await store.getSecuritySettings();
       if (settings.notifyOnAuthFailed) {
         const windowMs = settings.notifyAuthFailWindowMin * 60_000;
         const nowMs = Date.now();
@@ -326,7 +335,7 @@ export async function createApp(config = loadConfig(), services: AppServices = {
 
   const requireAdmin = async (request: FastifyRequest, reply: FastifyReply) => {
     const sessionId = request.cookies[sessionCookie];
-    if (!sessionId || !store.hasSession(sessionId)) {
+    if (!sessionId || !(await store.hasSession(sessionId))) {
       (request as any).audit = { authType: 'invalid_admin_session' };
       return reply.unauthorized('admin login required');
     }
@@ -349,12 +358,12 @@ export async function createApp(config = loadConfig(), services: AppServices = {
         for (const outgoing of outgoingPayloads(payload)) {
           const messageId = await pool.send({ apiKey: upstream.apiKey }, outgoing);
           messageIds.push(messageId);
-          store.addHistory({ source, credentialId: target.credentialId, upstreamId: upstream.id, status: 'success', title, content: outgoing.content ?? outgoing.mediaUrl ?? null, mediaType: outgoing.mediaType ?? null, messageId, error: null });
+          await store.addHistory({ source, credentialId: target.credentialId, upstreamId: upstream.id, status: 'success', title, content: outgoing.content ?? outgoing.mediaUrl ?? null, mediaType: outgoing.mediaType ?? null, messageId, error: null });
         }
         return { upstreamId: upstream.id, upstreamName: upstream.name, ok: true as const, messageId: messageIds[0], messageIds };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        store.addHistory({ source, credentialId: target.credentialId, upstreamId: upstream.id, status: 'failed', title, content: payload.content ?? payload.mediaUrl ?? null, mediaType: payload.mediaType ?? null, messageId: null, error: message });
+        await store.addHistory({ source, credentialId: target.credentialId, upstreamId: upstream.id, status: 'failed', title, content: payload.content ?? payload.mediaUrl ?? null, mediaType: payload.mediaType ?? null, messageId: null, error: message });
         return { upstreamId: upstream.id, upstreamName: upstream.name, ok: false as const, error: message, messageIds };
       }
     }));
@@ -401,7 +410,7 @@ export async function createApp(config = loadConfig(), services: AppServices = {
 
   app.get('/healthz', async (request, reply) => {
     const sessionId = request.cookies[sessionCookie];
-    if (sessionId && store.hasSession(sessionId)) {
+    if (sessionId && (await store.hasSession(sessionId))) {
       (request as any).audit = { authType: 'admin_session', credentialName: config.adminUsername };
       return { ok: true };
     }
@@ -409,8 +418,8 @@ export async function createApp(config = loadConfig(), services: AppServices = {
     const authorization = request.headers.authorization;
     if (authorization?.startsWith('Bearer ')) {
       const secret = authorization.slice(7).trim();
-      const webhookCred = secret ? store.findCredential('webhook', secret) : undefined;
-      const gotifyCred = !webhookCred && secret ? store.findCredential('gotify', secret) : undefined;
+      const webhookCred = secret ? await store.findCredential('webhook', secret) : undefined;
+      const gotifyCred = !webhookCred && secret ? await store.findCredential('gotify', secret) : undefined;
       if (webhookCred) {
         (request as any).audit = { authType: 'webhook', credentialName: webhookCred.name, maskedSecret: maskSecretKey(secret) };
         return { ok: true };
@@ -423,7 +432,7 @@ export async function createApp(config = loadConfig(), services: AppServices = {
 
     const gotifyKey = request.headers['x-gotify-key'];
     if (typeof gotifyKey === 'string' && gotifyKey.trim()) {
-      const cred = store.findCredential('gotify', gotifyKey.trim());
+      const cred = await store.findCredential('gotify', gotifyKey.trim());
       if (cred) {
         (request as any).audit = { authType: 'gotify', credentialName: cred.name, maskedSecret: maskSecretKey(gotifyKey) };
         return { ok: true };
@@ -433,8 +442,8 @@ export async function createApp(config = loadConfig(), services: AppServices = {
     const queryToken = (request.query as { token?: string } | undefined)?.token;
     if (typeof queryToken === 'string' && queryToken.trim()) {
       const token = queryToken.trim();
-      const gotifyCred = store.findCredential('gotify', token);
-      const webhookCred = !gotifyCred ? store.findCredential('webhook', token) : undefined;
+      const gotifyCred = await store.findCredential('gotify', token);
+      const webhookCred = !gotifyCred ? await store.findCredential('webhook', token) : undefined;
       if (gotifyCred) {
         (request as any).audit = { authType: 'gotify', credentialName: gotifyCred.name, maskedSecret: maskSecretKey(token) };
         return { ok: true };
@@ -452,7 +461,7 @@ export async function createApp(config = loadConfig(), services: AppServices = {
 
   app.post<{ Querystring: { token?: string }; Body: GotifyRequest }>('/message', async (request, reply) => {
     const ip = request.ip;
-    const allowed = store.loginAllowed(ip);
+    const allowed = await store.loginAllowed(ip);
     if (!allowed.allowed) {
       return reply.code(429).header('Retry-After', String(allowed.retryAfter)).send({
         error: 'IP is temporarily blocked due to too many failed attempts',
@@ -464,12 +473,12 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       request.query.token ||
       (typeof request.headers['x-gotify-key'] === 'string' ? request.headers['x-gotify-key'] : undefined) ||
       (request.headers.authorization?.startsWith('Bearer ') ? request.headers.authorization.slice(7).trim() : undefined);
-    const credential = token ? store.findCredential('gotify', token) : undefined;
+    const credential = token ? await store.findCredential('gotify', token) : undefined;
     if (!credential || credential.upstreams.length === 0) {
-      const failResult = store.recordLoginFailure(ip);
+      const failResult = await store.recordLoginFailure(ip);
       (request as any).audit = { authType: 'invalid_gotify_token', maskedSecret: token ? maskSecretKey(token) : undefined };
       if (failResult.locked) {
-        const settings = store.getSecuritySettings();
+        const settings = await store.getSecuritySettings();
         if (settings.notifyOnAuthFailed) {
           sendSecurityAlert(
             'auth_failed',
@@ -481,7 +490,7 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       }
       return reply.unauthorized('invalid or unbound Gotify token');
     }
-    store.clearLoginFailures(ip);
+    await store.clearLoginFailures(ip);
     (request as any).audit = {
       authType: 'gotify',
       credentialName: credential.name,
@@ -531,7 +540,7 @@ export async function createApp(config = loadConfig(), services: AppServices = {
 
     const targetPhone = payload.to || (body as any)?.phone || (body as any)?.to || (request.query as any)?.phone || (request.query as any)?.to;
     const msgContent = payload.content || body.message;
-    const secSettings = store.getSecuritySettings();
+    const secSettings = await store.getSecuritySettings();
     const rlCheck = await rateLimiter.check(
       { phone: targetPhone, ip: request.ip, content: msgContent, credentialId: credential.id },
       secSettings
@@ -567,7 +576,7 @@ export async function createApp(config = loadConfig(), services: AppServices = {
 
   app.post<{ Body: NativeSendRequest }>('/webhook', async (request, reply) => {
     const ip = request.ip;
-    const allowed = store.loginAllowed(ip);
+    const allowed = await store.loginAllowed(ip);
     if (!allowed.allowed) {
       return reply.code(429).header('Retry-After', String(allowed.retryAfter)).send({
         error: 'IP is temporarily blocked due to too many failed attempts',
@@ -577,12 +586,12 @@ export async function createApp(config = loadConfig(), services: AppServices = {
 
     const authorization = request.headers.authorization;
     const secret = authorization?.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
-    const credential = secret ? store.findCredential('webhook', secret) : undefined;
+    const credential = secret ? await store.findCredential('webhook', secret) : undefined;
     if (!credential || credential.upstreams.length === 0) {
-      const failResult = store.recordLoginFailure(ip);
+      const failResult = await store.recordLoginFailure(ip);
       (request as any).audit = { authType: 'invalid_webhook_secret', maskedSecret: secret ? maskSecretKey(secret) : undefined };
       if (failResult.locked) {
-        const settings = store.getSecuritySettings();
+        const settings = await store.getSecuritySettings();
         if (settings.notifyOnAuthFailed) {
           sendSecurityAlert(
             'auth_failed',
@@ -594,7 +603,7 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       }
       return reply.unauthorized('invalid or unbound webhook secret');
     }
-    store.clearLoginFailures(ip);
+    await store.clearLoginFailures(ip);
     (request as any).audit = {
       authType: 'webhook',
       credentialName: credential.name,
@@ -645,7 +654,7 @@ export async function createApp(config = loadConfig(), services: AppServices = {
     const rawBody = request.body as any;
     const targetPhone = payload.to || rawBody?.to || rawBody?.phone || (request.query as any)?.phone || (request.query as any)?.to;
     const msgContent = payload.content;
-    const secSettings = store.getSecuritySettings();
+    const secSettings = await store.getSecuritySettings();
     const rlCheck = await rateLimiter.check(
       { phone: targetPhone, ip: request.ip, content: msgContent, credentialId: credential.id },
       secSettings
@@ -680,13 +689,13 @@ export async function createApp(config = loadConfig(), services: AppServices = {
 
   app.post<{ Body: { username?: string; password?: string } }>('/admin/api/login', async (request, reply) => {
     const ip = request.ip;
-    const allowed = store.loginAllowed(ip);
+    const allowed = await store.loginAllowed(ip);
     if (!allowed.allowed) return reply.code(429).header('Retry-After', String(allowed.retryAfter)).send({ error: 'too many login failures', retryAfter: allowed.retryAfter });
     const body = request.body ?? {};
     if (!safeEqual(body.username ?? '', config.adminUsername) || !safeEqual(body.password ?? '', config.adminPassword)) {
-      const failResult = store.recordLoginFailure(ip);
+      const failResult = await store.recordLoginFailure(ip);
       (request as any).audit = { authType: 'login_failed', credentialName: body.username || 'unknown' };
-      const settings = store.getSecuritySettings();
+      const settings = await store.getSecuritySettings();
       if (settings.notifyOnLoginFailed) {
         if (failResult.locked) {
           sendSecurityAlert(
@@ -706,12 +715,12 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       }
       return reply.unauthorized('invalid username or password');
     }
-    store.clearLoginFailures(ip);
+    await store.clearLoginFailures(ip);
     (request as any).audit = { authType: 'login_success', credentialName: config.adminUsername };
 
-    const previousIp = store.getLastLoginIp();
-    store.setLastLoginIp(ip);
-    store.setSetting('last_login_time', new Date().toISOString());
+    const previousIp = await store.getLastLoginIp();
+    await store.setLastLoginIp(ip);
+    await store.setSetting('last_login_time', new Date().toISOString());
 
     if (previousIp && previousIp !== ip) {
       sendSecurityAlert(
@@ -723,21 +732,21 @@ export async function createApp(config = loadConfig(), services: AppServices = {
     }
     const sessionId = crypto.randomBytes(32).toString('base64url');
     const expires = new Date(Date.now() + 8 * 60 * 60_000);
-    store.createSession(sessionId, expires);
+    await store.createSession(sessionId, expires);
     reply.setCookie(sessionCookie, sessionId, { httpOnly: true, sameSite: 'strict', secure: config.cookieSecure, path: '/', expires });
     return { ok: true, username: config.adminUsername };
   });
 
   app.post('/admin/api/logout', { preHandler: requireAdmin }, async (request, reply) => {
     const sessionId = request.cookies[sessionCookie];
-    if (sessionId) store.deleteSession(sessionId);
+    if (sessionId) await store.deleteSession(sessionId);
     reply.clearCookie(sessionCookie, { path: '/' });
     return { ok: true };
   });
   app.get('/admin/api/me', { preHandler: requireAdmin }, async () => ({ username: config.adminUsername }));
 
   app.get('/admin/api/settings', { preHandler: requireAdmin }, async () => {
-    const sec = store.getSecuritySettings();
+    const sec = await store.getSecuritySettings();
     return {
       adminUsername: config.adminUsername,
       adminLoginFailLimit: config.adminLoginFailLimit,
@@ -882,7 +891,7 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       if (!Number.isInteger(body.notifyUpstreamId) || body.notifyUpstreamId < 0) {
         return reply.badRequest('notifyUpstreamId must be an integer >= 0');
       }
-      if (body.notifyUpstreamId > 0 && !store.getUpstream(body.notifyUpstreamId)) {
+      if (body.notifyUpstreamId > 0 && !(await store.getUpstream(body.notifyUpstreamId))) {
         return reply.badRequest('selected upstream does not exist');
       }
     }
@@ -1034,7 +1043,7 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       loginBanDurationMs: config.adminLoginBanDurationMs
     });
 
-    store.updateSecuritySettings({
+    await store.updateSecuritySettings({
       accessLogFormat: body.accessLogFormat,
       accessLogRetentionDays: body.accessLogRetentionDays,
       notifyOnLogin: body.notifyOnLogin,
@@ -1079,35 +1088,35 @@ export async function createApp(config = loadConfig(), services: AppServices = {
   );
 
   app.get('/admin/api/risks/summary', { preHandler: requireAdmin }, async () => {
-    return store.getSecurityRiskSummary();
+    return await store.getSecurityRiskSummary();
   });
 
   app.get('/admin/api/risks/bans', { preHandler: requireAdmin }, async () => {
-    return { items: store.listLockedIps() };
+    return { items: await store.listLockedIps() };
   });
 
   app.delete<{ Params: { ip: string } }>('/admin/api/risks/bans/:ip', { preHandler: requireAdmin }, async (request, reply) => {
     const ip = request.params.ip?.trim();
     if (!ip) return reply.badRequest('IP is required');
-    const unbanned = store.unbanIp(ip);
+    const unbanned = await store.unbanIp(ip);
     return { ok: true, unbanned };
   });
 
   app.get<{ Querystring: { page?: string; pageSize?: string } }>('/admin/api/risks/alerts', { preHandler: requireAdmin }, async request => {
     const page = Math.max(1, Number(request.query.page) || 1);
     const pageSize = Math.max(1, Math.min(Number(request.query.pageSize) || 20, 100));
-    return store.listSecurityAlerts(page, pageSize);
+    return await store.listSecurityAlerts(page, pageSize);
   });
 
   app.post<{ Params: { id: string } }>('/admin/api/risks/alerts/:id/resolve', { preHandler: requireAdmin }, async (request, reply) => {
     const id = Number(request.params.id);
     if (!Number.isInteger(id)) return reply.badRequest('invalid alert id');
-    const resolved = store.resolveSecurityAlert(id);
+    const resolved = await store.resolveSecurityAlert(id);
     return { ok: true, resolved };
   });
 
   app.post('/admin/api/risks/alerts/resolve-all', { preHandler: requireAdmin }, async () => {
-    const resolvedCount = store.resolveAllSecurityAlerts();
+    const resolvedCount = await store.resolveAllSecurityAlerts();
     return { ok: true, resolvedCount };
   });
 
@@ -1118,14 +1127,14 @@ export async function createApp(config = loadConfig(), services: AppServices = {
     return accessLogger.readDangerousLogs(date, page, pageSize);
   });
 
-  app.get('/admin/api/upstreams', { preHandler: requireAdmin }, async () => store.listUpstreams());
+  app.get('/admin/api/upstreams', { preHandler: requireAdmin }, async () => await store.listUpstreams());
   app.post<{ Body: { name?: string; apiKey?: string } }>('/admin/api/upstreams', { preHandler: requireAdmin }, async (request, reply) => {
     const name = request.body?.name?.trim();
     const apiKey = request.body?.apiKey?.trim();
     if (!name || !apiKey) return reply.badRequest('name and apiKey are required');
     try {
       await pool.verify(apiKey);
-      return reply.code(201).send(store.addUpstream(name, apiKey));
+      return reply.code(201).send(await store.addUpstream(name, apiKey));
     } catch {
       request.log.warn({ name, apiKey: maskSecret(apiKey) }, 'upstream verification failed');
       return reply.badRequest('upstream API Key verification failed');
@@ -1134,20 +1143,21 @@ export async function createApp(config = loadConfig(), services: AppServices = {
   app.delete<{ Params: { id: string } }>('/admin/api/upstreams/:id', { preHandler: requireAdmin }, async (request, reply) => {
     const id = Number(request.params.id);
     if (!Number.isInteger(id)) return reply.badRequest('invalid upstream id');
-    if (!store.deleteUpstream(id)) return reply.notFound('upstream not found');
+    if (!(await store.deleteUpstream(id))) return reply.notFound('upstream not found');
     return reply.code(204).send();
   });
 
-  app.get('/admin/api/credentials', { preHandler: requireAdmin }, async () => store.listCredentials());
+  app.get('/admin/api/credentials', { preHandler: requireAdmin }, async () => await store.listCredentials());
   app.post<{ Body: { name?: string; kind?: CredentialKind; secret?: string; upstreamIds?: number[] } }>('/admin/api/credentials', { preHandler: requireAdmin }, async (request, reply) => {
     const name = request.body?.name?.trim();
     const kind = request.body?.kind;
     const secret = request.body?.secret?.trim() || crypto.randomBytes(24).toString('base64url');
     const upstreamIds = [...new Set(request.body?.upstreamIds ?? [])];
     if (!name || (kind !== 'gotify' && kind !== 'webhook') || upstreamIds.length === 0 || upstreamIds.some(id => !Number.isInteger(id))) return reply.badRequest('name, kind, and one or more upstreamIds are required');
-    if (upstreamIds.some(id => !store.getUpstream(id))) return reply.badRequest('one or more upstreams do not exist');
+    const checkedUpstreams = await Promise.all(upstreamIds.map(id => store.getUpstream(id)));
+    if (checkedUpstreams.some(u => !u)) return reply.badRequest('one or more upstreams do not exist');
     try {
-      const credential = store.createCredential(name, kind, secret, upstreamIds);
+      const credential = await store.createCredential(name, kind, secret, upstreamIds);
       return reply.code(201).send({ ...credential, secret });
     } catch {
       return reply.badRequest('credential name or secret already exists');
@@ -1156,7 +1166,7 @@ export async function createApp(config = loadConfig(), services: AppServices = {
   app.delete<{ Params: { id: string } }>('/admin/api/credentials/:id', { preHandler: requireAdmin }, async (request, reply) => {
     const id = Number(request.params.id);
     if (!Number.isInteger(id)) return reply.badRequest('invalid credential id');
-    if (!store.deleteCredential(id)) return reply.notFound('credential not found');
+    if (!(await store.deleteCredential(id))) return reply.notFound('credential not found');
     return reply.code(204).send();
   });
 
@@ -1182,8 +1192,8 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       return reply.badRequest('provide either an uploaded file or mediaUrl, not both');
     }
 
-    const upstreams = upstreamIds.map(id => store.getUpstream(id));
-    if (upstreams.some(item => !item)) {
+    const upstreams = (await Promise.all(upstreamIds.map(id => store.getUpstream(id)))).filter(Boolean) as Upstream[];
+    if (upstreams.length !== upstreamIds.length) {
       if (input.file) await unlink(input.file.path).catch(() => undefined);
       return reply.badRequest('one or more upstreams do not exist');
     }
@@ -1209,7 +1219,7 @@ export async function createApp(config = loadConfig(), services: AppServices = {
     try {
       const results = await handleDispatchWithMedia(
         'manual',
-        { upstreams: upstreams as Upstream[] },
+        { upstreams },
         payload,
         title || null,
         input.file
@@ -1227,10 +1237,10 @@ export async function createApp(config = loadConfig(), services: AppServices = {
     if (request.query.page !== undefined || request.query.pageSize !== undefined) {
       const page = Math.max(1, Number(request.query.page) || 1);
       const pageSize = Math.max(1, Math.min(Number(request.query.pageSize) || 20, 100));
-      return store.listHistoryPaged(page, pageSize);
+      return await store.listHistoryPaged(page, pageSize);
     }
     const requested = Number(request.query.limit ?? 100);
-    return store.listHistory(Number.isInteger(requested) ? Math.max(1, Math.min(requested, 500)) : 100);
+    return await store.listHistory(Number.isInteger(requested) ? Math.max(1, Math.min(requested, 500)) : 100);
   });
   return app;
 }

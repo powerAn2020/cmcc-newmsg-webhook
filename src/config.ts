@@ -19,6 +19,8 @@ function parseMap(name: string, fallback = '{}'): Record<string, CmccAccount> {
   }
 }
 
+export type DatabaseType = 'sqlite' | 'postgres' | 'mysql';
+
 export interface AppConfig {
   host: string;
   port: number;
@@ -29,7 +31,15 @@ export interface AppConfig {
   uploadTimeoutMs: number;
   gotifyTokens: Record<string, CmccAccount>;
   webhookSecrets: Record<string, CmccAccount>;
+  databaseType: DatabaseType;
   databasePath: string;
+  databaseUrl?: string;
+  databaseHost?: string;
+  databasePort?: number;
+  databaseUser?: string;
+  databasePassword?: string;
+  databaseName?: string;
+  databaseSsl?: boolean;
   adminUsername: string;
   adminPassword: string;
   encryptionKey: string;
@@ -127,6 +137,21 @@ export function loadConfig(): AppConfig {
   const rateLimitDuplicateWindowSec = Math.max(0, Number(process.env.RATE_LIMIT_DUPLICATE_WINDOW_SEC ?? 300) || 300);
   const notifyOnRateLimit = process.env.NOTIFY_ON_RATE_LIMIT !== 'false';
 
+  const rawDbType = (process.env.DB_TYPE || process.env.DATABASE_TYPE || 'sqlite').toLowerCase();
+  const databaseType: DatabaseType = rawDbType === 'postgres' || rawDbType === 'postgresql' || rawDbType === 'pg'
+    ? 'postgres'
+    : rawDbType === 'mysql' || rawDbType === 'mariadb'
+      ? 'mysql'
+      : 'sqlite';
+
+  const databaseUrl = process.env.DATABASE_URL || undefined;
+  const databaseHost = process.env.DB_HOST || undefined;
+  const databasePort = process.env.DB_PORT ? Number(process.env.DB_PORT) : undefined;
+  const databaseUser = process.env.DB_USER || undefined;
+  const databasePassword = process.env.DB_PASSWORD || undefined;
+  const databaseName = process.env.DB_NAME || undefined;
+  const databaseSsl = process.env.DB_SSL === 'true';
+
   return {
     host: process.env.HOST ?? '0.0.0.0',
     port,
@@ -137,7 +162,15 @@ export function loadConfig(): AppConfig {
     uploadTimeoutMs,
     gotifyTokens: parseMap('CMCC_TOKEN_MAP'),
     webhookSecrets: parseMap('CMCC_WEBHOOK_SECRETS'),
+    databaseType,
     databasePath: process.env.CMCC_DATABASE_PATH ?? './data/cmcc-webhook.sqlite',
+    databaseUrl,
+    databaseHost,
+    databasePort,
+    databaseUser,
+    databasePassword,
+    databaseName,
+    databaseSsl,
     adminUsername,
     adminPassword,
     encryptionKey,
