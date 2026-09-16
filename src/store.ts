@@ -9,7 +9,33 @@ type CredentialRow = { id: number; name: string; kind: CredentialKind; secret: s
 
 function now(): string { return new Date().toISOString(); }
 
-export class Store {
+export interface IStore {
+  listUpstreams(): UpstreamSummary[];
+  addUpstream(name: string, apiKey: string): UpstreamSummary;
+  deleteUpstream(id: number): boolean;
+  getUpstream(id: number): { id: number; name: string; apiKey: string } | undefined;
+  createCredential(name: string, kind: CredentialKind, secret: string, upstreamIds: number[]): CredentialSummary;
+  listCredentials(): CredentialSummary[];
+  deleteCredential(id: number): boolean;
+  findCredential(kind: CredentialKind, secret: string): { id: number; name: string; upstreams: { id: number; name: string; apiKey: string }[] } | undefined;
+  addHistory(input: Omit<HistoryEntry, 'id' | 'createdAt' | 'credentialName' | 'upstreamName'> & { credentialId?: number; upstreamId?: number }): void;
+  listHistory(limit?: number): HistoryEntry[];
+  listHistoryPaged(page?: number, pageSize?: number): { items: HistoryEntry[]; total: number; page: number; pageSize: number; totalPages: number };
+  createSession(sessionId: string, expiresAt: Date): void;
+  hasSession(sessionId: string): boolean;
+  deleteSession(sessionId: string): void;
+  loginAllowed(ip: string): { allowed: boolean; retryAfter?: number };
+  updateBruteForceOptions(options: { loginFailLimit?: number; loginFailWindowMs?: number; loginBanDurationMs?: number }): void;
+  recordLoginFailure(ip: string): { count: number; locked: boolean; lockDurationMs: number };
+  clearLoginFailures(ip: string): void;
+  getSetting(key: string, defaultValue?: string): string;
+  setSetting(key: string, value: string): void;
+  getSecuritySettings(): SecurityAlertSettings;
+  updateSecuritySettings(settings: Partial<SecurityAlertSettings>): void;
+  close(): void;
+}
+
+export class Store implements IStore {
   private readonly db: DatabaseSync;
   private readonly key: Buffer;
   private loginFailLimit: number;
@@ -155,6 +181,21 @@ export class Store {
       }));
   }
 
+  listHistoryPaged(page = 1, pageSize = 20): { items: HistoryEntry[]; total: number; page: number; pageSize: number; totalPages: number } {
+    const totalRow = this.db.prepare('SELECT COUNT(*) as count FROM notification_history').get() as { count: number };
+    const total = totalRow.count;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const safePage = Math.min(Math.max(1, page), totalPages);
+    const offset = (safePage - 1) * pageSize;
+    const items = this.db.prepare(`SELECT h.id, h.created_at, h.source, c.name credential_name, u.name upstream_name, h.status, h.title, h.content, h.media_type, h.message_id, h.error
+      FROM notification_history h LEFT JOIN credentials c ON c.id = h.credential_id LEFT JOIN upstreams u ON u.id = h.upstream_id
+      ORDER BY h.id DESC LIMIT ? OFFSET ?`).all(pageSize, offset).map((row: any) => ({
+        id: row.id, createdAt: row.created_at, source: row.source, credentialName: row.credential_name, upstreamName: row.upstream_name,
+        status: row.status, title: row.title, content: row.content, mediaType: row.media_type, messageId: row.message_id, error: row.error
+      }));
+    return { items, total, page: safePage, pageSize, totalPages };
+  }
+
   createSession(sessionId: string, expiresAt: Date) {
     this.db.prepare('INSERT INTO sessions (id_hash, expires_at, created_at) VALUES (?, ?, ?)').run(this.hash(sessionId), expiresAt.toISOString(), now());
   }
@@ -201,16 +242,28 @@ export class Store {
   }
 
   getSecuritySettings(): SecurityAlertSettings {
+    const parseNum = (key: string, def: number) => {
+      const v = this.getSetting(key);
+      if (!v && v !== '0') return def;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : def;
+    };
     return {
       accessLogFormat: this.getSetting('accessLogFormat', 'text') === 'json' ? 'json' : 'text',
-      accessLogRetentionDays: Math.max(1, Number(this.getSetting('accessLogRetentionDays', '30')) || 30),
+      accessLogRetentionDays: Math.max(1, parseNum('accessLogRetentionDays', 30)),
       notifyOnLogin: this.getSetting('notifyOnLogin', 'false') === 'true',
       notifyOnLoginFailed: this.getSetting('notifyOnLoginFailed', 'false') === 'true',
       notifyOnAuthFailed: this.getSetting('notifyOnAuthFailed', 'false') === 'true',
-      notifyUpstreamId: Number(this.getSetting('notifyUpstreamId', '0')) || 0,
-      notifyLoginFailThreshold: Math.max(1, Number(this.getSetting('notifyLoginFailThreshold', '3')) || 3),
-      notifyAuthFailThreshold: Math.max(1, Number(this.getSetting('notifyAuthFailThreshold', '3')) || 3),
-      notifyAuthFailWindowMin: Math.max(1, Number(this.getSetting('notifyAuthFailWindowMin', '1')) || 1)
+      notifyUpstreamId: parseNum('notifyUpstreamId', 0),
+      notifyLoginFailThreshold: Math.max(1, parseNum('notifyLoginFailThreshold', 3)),
+      notifyAuthFailThreshold: Math.max(1, parseNum('notifyAuthFailThreshold', 3)),
+      notifyAuthFailWindowMin: Math.max(1, parseNum('notifyAuthFailWindowMin', 1)),
+      rateLimitPhoneMinIntervalSec: Math.max(0, parseNum('rateLimitPhoneMinIntervalSec', 60)),
+      rateLimitPhoneHourMax: Math.max(0, parseNum('rateLimitPhoneHourMax', 10)),
+      rateLimitPhoneDayMax: Math.max(0, parseNum('rateLimitPhoneDayMax', 20)),
+      rateLimitIpMinMax: Math.max(0, parseNum('rateLimitIpMinMax', 30)),
+      rateLimitDuplicateWindowSec: Math.max(0, parseNum('rateLimitDuplicateWindowSec', 300)),
+      notifyOnRateLimit: this.getSetting('notifyOnRateLimit', 'true') === 'true'
     };
   }
 
@@ -224,9 +277,29 @@ export class Store {
     if (settings.notifyLoginFailThreshold !== undefined) this.setSetting('notifyLoginFailThreshold', String(settings.notifyLoginFailThreshold));
     if (settings.notifyAuthFailThreshold !== undefined) this.setSetting('notifyAuthFailThreshold', String(settings.notifyAuthFailThreshold));
     if (settings.notifyAuthFailWindowMin !== undefined) this.setSetting('notifyAuthFailWindowMin', String(settings.notifyAuthFailWindowMin));
+    if (settings.rateLimitPhoneMinIntervalSec !== undefined) this.setSetting('rateLimitPhoneMinIntervalSec', String(settings.rateLimitPhoneMinIntervalSec));
+    if (settings.rateLimitPhoneHourMax !== undefined) this.setSetting('rateLimitPhoneHourMax', String(settings.rateLimitPhoneHourMax));
+    if (settings.rateLimitPhoneDayMax !== undefined) this.setSetting('rateLimitPhoneDayMax', String(settings.rateLimitPhoneDayMax));
+    if (settings.rateLimitIpMinMax !== undefined) this.setSetting('rateLimitIpMinMax', String(settings.rateLimitIpMinMax));
+    if (settings.rateLimitDuplicateWindowSec !== undefined) this.setSetting('rateLimitDuplicateWindowSec', String(settings.rateLimitDuplicateWindowSec));
+    if (settings.notifyOnRateLimit !== undefined) this.setSetting('notifyOnRateLimit', String(settings.notifyOnRateLimit));
   }
 
   close() { this.db.close(); }
+}
+
+export { Store as SqliteStore };
+
+export function createStore(
+  databasePath: string,
+  encryptionKey: string,
+  options?: {
+    loginFailLimit?: number;
+    loginFailWindowMs?: number;
+    loginBanDurationMs?: number;
+  }
+): IStore {
+  return new Store(databasePath, encryptionKey, options);
 }
 
 export interface SecurityAlertSettings {
@@ -239,5 +312,11 @@ export interface SecurityAlertSettings {
   notifyLoginFailThreshold: number;
   notifyAuthFailThreshold: number;
   notifyAuthFailWindowMin: number;
+  rateLimitPhoneMinIntervalSec: number;
+  rateLimitPhoneHourMax: number;
+  rateLimitPhoneDayMax: number;
+  rateLimitIpMinMax: number;
+  rateLimitDuplicateWindowSec: number;
+  notifyOnRateLimit: boolean;
 }
 

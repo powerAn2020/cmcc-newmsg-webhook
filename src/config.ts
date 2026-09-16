@@ -49,6 +49,12 @@ export interface AppConfig {
   notifyLoginFailThreshold: number;
   notifyAuthFailThreshold: number;
   notifyAuthFailWindowMin: number;
+  rateLimitPhoneMinIntervalSec: number;
+  rateLimitPhoneHourMax: number;
+  rateLimitPhoneDayMax: number;
+  rateLimitIpMinMax: number;
+  rateLimitDuplicateWindowSec: number;
+  notifyOnRateLimit: boolean;
 }
 
 export function loadConfig(): AppConfig {
@@ -114,6 +120,13 @@ export function loadConfig(): AppConfig {
   const notifyAuthFailThreshold = Math.max(1, Number(process.env.NOTIFY_AUTH_FAIL_THRESHOLD ?? 3) || 3);
   const notifyAuthFailWindowMin = Math.max(1, Number(process.env.NOTIFY_AUTH_FAIL_WINDOW_MIN ?? 1) || 1);
 
+  const rateLimitPhoneMinIntervalSec = Math.max(0, Number(process.env.RATE_LIMIT_PHONE_MIN_INTERVAL_SEC ?? 60) || 60);
+  const rateLimitPhoneHourMax = Math.max(0, Number(process.env.RATE_LIMIT_PHONE_HOUR_MAX ?? 10) || 10);
+  const rateLimitPhoneDayMax = Math.max(0, Number(process.env.RATE_LIMIT_PHONE_DAY_MAX ?? 20) || 20);
+  const rateLimitIpMinMax = Math.max(0, Number(process.env.RATE_LIMIT_IP_MIN_MAX ?? 30) || 30);
+  const rateLimitDuplicateWindowSec = Math.max(0, Number(process.env.RATE_LIMIT_DUPLICATE_WINDOW_SEC ?? 300) || 300);
+  const notifyOnRateLimit = process.env.NOTIFY_ON_RATE_LIMIT !== 'false';
+
   return {
     host: process.env.HOST ?? '0.0.0.0',
     port,
@@ -143,7 +156,13 @@ export function loadConfig(): AppConfig {
     notifyUpstreamId,
     notifyLoginFailThreshold,
     notifyAuthFailThreshold,
-    notifyAuthFailWindowMin
+    notifyAuthFailWindowMin,
+    rateLimitPhoneMinIntervalSec,
+    rateLimitPhoneHourMax,
+    rateLimitPhoneDayMax,
+    rateLimitIpMinMax,
+    rateLimitDuplicateWindowSec,
+    notifyOnRateLimit
   };
 }
 

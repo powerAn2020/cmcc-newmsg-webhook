@@ -33,3 +33,108 @@ input[type="checkbox"], input[type="radio"] { width: 16px !important; height: 16
 .log-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .log-select { min-height: 36px; padding: 4px 10px; width: auto; min-width: 140px; font-size: 13px; }
 
+/* Dark Mode & Theme Overrides */
+[data-theme="dark"] {
+  --ink: #e6edf3;
+  --muted: #8b949e;
+  --line: #30363d;
+  --paper: #0d1117;
+  --surface: #161b22;
+  --input-bg: #21262d;
+  --teal: #238636;
+  --teal-dark: #2ea043;
+  --teal-soft: #162a22;
+  --red: #f85149;
+  --amber: #d29922;
+  --shadow: 0 12px 30px rgba(0, 0, 0, .45);
+}
+[data-theme="dark"] input,
+[data-theme="dark"] select,
+[data-theme="dark"] textarea {
+  background: var(--input-bg);
+  border-color: var(--line);
+  color: var(--ink);
+}
+[data-theme="dark"] th {
+  background: #1c2128;
+  color: var(--muted);
+}
+[data-theme="dark"] .pagination-bar {
+  background: #161b22;
+  border-color: var(--line);
+}
+[data-theme="dark"] .pagination-btn {
+  background: #21262d;
+  border-color: var(--line);
+  color: var(--ink);
+}
+[data-theme="dark"] .login-intro {
+  background: #162425;
+}
+[data-theme="dark"] .login-intro > p:last-child {
+  color: #8b949e;
+}
+[data-theme="dark"] .service-state {
+  background: #1b3228;
+  border-color: #2a5241;
+  color: #56d364;
+}
+[data-theme="dark"] .data-row {
+  border-bottom-color: var(--line);
+}
+[data-theme="dark"] .check-option {
+  border-color: var(--line);
+  color: var(--ink);
+}
+[data-theme="dark"] .secret-reveal {
+  background: #1b3228;
+  border-color: #2a5241;
+}
+[data-theme="dark"] .secret-reveal code {
+  color: #7ee787;
+}
+[data-theme="dark"] .mode-control {
+  background: #21262d;
+  border-color: var(--line);
+}
+[data-theme="dark"] th,
+[data-theme="dark"] td {
+  border-bottom-color: var(--line);
+  color: var(--ink);
+}
+[data-theme="dark"] .button.secondary {
+  background: #21262d;
+  border-color: var(--line);
+  color: var(--ink);
+}
+[data-theme="dark"] .button.secondary:hover {
+  background: #30363d;
+}
+[data-theme="dark"] fieldset {
+  background: rgba(255, 255, 255, 0.02) !important;
+}
+
+.theme-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 16px;
+  transition: all .2s ease;
+}
+.theme-toggle-btn:hover {
+  border-color: var(--teal);
+  background: rgba(18, 109, 104, 0.1);
+}
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+

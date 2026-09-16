@@ -45,4 +45,22 @@ describe('SQLite store', () => {
     expect(store.deleteUpstream(upstream.id)).toBe(false);
     store.close();
   });
+
+  it('supports paginated history queries', () => {
+    const store = new Store(':memory:', 'test-encryption-key');
+    for (let i = 1; i <= 25; i++) {
+      store.addHistory({ source: 'manual', status: 'success', title: `Msg ${i}`, content: `Content ${i}`, mediaType: null, messageId: `id_${i}`, error: null });
+    }
+    const page1 = store.listHistoryPaged(1, 10);
+    expect(page1.total).toBe(25);
+    expect(page1.page).toBe(1);
+    expect(page1.totalPages).toBe(3);
+    expect(page1.items).toHaveLength(10);
+    expect(page1.items[0].title).toBe('Msg 25');
+
+    const page3 = store.listHistoryPaged(3, 10);
+    expect(page3.items).toHaveLength(5);
+    expect(page3.items[4].title).toBe('Msg 1');
+    store.close();
+  });
 });

@@ -33,7 +33,22 @@ const config: AppConfig = {
   adminLoginFailWindowMs: 900000,
   adminLoginBanDurationMin: 30,
   adminLoginBanDurationMs: 1800000,
-  accessLogPath: './logs/test-access.log'
+  accessLogPath: './logs/test-access.log',
+  accessLogFormat: 'text',
+  accessLogRetentionDays: 30,
+  notifyOnLogin: false,
+  notifyOnLoginFailed: false,
+  notifyOnAuthFailed: false,
+  notifyUpstreamId: 0,
+  notifyLoginFailThreshold: 3,
+  notifyAuthFailThreshold: 3,
+  notifyAuthFailWindowMin: 1,
+  rateLimitPhoneMinIntervalSec: 0,
+  rateLimitPhoneHourMax: 100,
+  rateLimitPhoneDayMax: 200,
+  rateLimitIpMinMax: 100,
+  rateLimitDuplicateWindowSec: 0,
+  notifyOnRateLimit: false
 };
 
 describe('admin push API', () => {
@@ -641,6 +656,117 @@ describe('admin push API', () => {
           content: expect.stringContaining('【安全告警】管理员多次登录失败触发封禁')
         })
       );
+    });
+  });
+
+  describe('Rate limiting and anti-bombing protection', () => {
+    let app: FastifyInstance;
+    let cookie: string;
+    let sent = 0;
+    const pool = {
+      verify: vi.fn(async () => undefined),
+      send: vi.fn(async () => `msg_${++sent}`),
+      close: vi.fn()
+    };
+    const uploader = { upload: vi.fn(async () => 'https://cdn.example/uploaded.txt') };
+
+    beforeEach(async () => {
+      sent = 0;
+      vi.clearAllMocks();
+      config.adminUsername = 'admin';
+      config.adminPassword = 'password';
+      config.rateLimitPhoneMinIntervalSec = 60;
+      config.rateLimitPhoneHourMax = 5;
+      config.rateLimitPhoneDayMax = 10;
+      config.rateLimitIpMinMax = 30;
+      config.rateLimitDuplicateWindowSec = 300;
+      config.notifyOnRateLimit = true;
+      config.notifyUpstreamId = 1;
+
+      app = await createApp(config, { pool, uploader });
+      const login = await app.inject({ method: 'POST', url: '/admin/api/login', payload: { username: 'admin', password: 'password' } });
+      cookie = String(login.headers['set-cookie']).split(';')[0];
+      await app.inject({
+        method: 'POST',
+        url: '/admin/api/upstreams',
+        headers: { cookie },
+        payload: { name: 'primary', apiKey: 'ak_primary' }
+      });
+      await app.inject({
+        method: 'POST',
+        url: '/admin/api/credentials',
+        headers: { cookie },
+        payload: { name: 'test_token', kind: 'gotify', secret: 'valid_rate_token', upstreamIds: [1] }
+      });
+      pool.send.mockClear();
+    });
+
+    afterEach(async () => {
+      await app.close();
+    });
+
+    it('blocks rapid successive messages to the same phone (anti-bombing) with 429 and sends alert', async () => {
+      // First request: succeeds
+      const res1 = await app.inject({
+        method: 'POST',
+        url: '/message?token=valid_rate_token',
+        payload: { message: 'Verification code: 111111', phone: '13800138000' }
+      });
+      expect(res1.statusCode).toBe(200);
+      expect(pool.send).toHaveBeenCalledTimes(1);
+
+      pool.send.mockClear();
+
+      // Second request immediately after: should be blocked by minimum interval
+      const res2 = await app.inject({
+        method: 'POST',
+        url: '/message?token=valid_rate_token',
+        payload: { message: 'Verification code: 222222', phone: '13800138000' }
+      });
+      expect(res2.statusCode).toBe(429);
+      expect(res2.headers['retry-after']).toBeDefined();
+      expect(res2.json().error).toContain('发送间隔不能少于');
+
+      // Wait a tick for async security notification
+      await new Promise(r => setTimeout(r, 50));
+      expect(pool.send).toHaveBeenCalledWith(
+        { apiKey: 'ak_primary' },
+        expect.objectContaining({
+          type: 'send',
+          content: expect.stringContaining('【风控拦截】防消息轰炸/频率超限拦截')
+        })
+      );
+    });
+
+    it('blocks duplicate message content to the same phone within window with 429', async () => {
+      // Disable minimum interval to isolate content deduplication
+      config.rateLimitPhoneMinIntervalSec = 0;
+      await app.inject({
+        method: 'POST',
+        url: '/admin/api/settings',
+        headers: { cookie },
+        payload: {
+          rateLimitPhoneMinIntervalSec: 0,
+          rateLimitDuplicateWindowSec: 300
+        }
+      });
+
+      // First request
+      const res1 = await app.inject({
+        method: 'POST',
+        url: '/message?token=valid_rate_token',
+        payload: { message: 'Repeated content notice', phone: '13900139000' }
+      });
+      expect(res1.statusCode).toBe(200);
+
+      // Second request with identical content to same phone
+      const res2 = await app.inject({
+        method: 'POST',
+        url: '/message?token=valid_rate_token',
+        payload: { message: 'Repeated content notice', phone: '13900139000' }
+      });
+      expect(res2.statusCode).toBe(429);
+      expect(res2.json().error).toContain('已被拦截抑制');
     });
   });
 });
