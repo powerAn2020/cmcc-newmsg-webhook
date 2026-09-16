@@ -24,6 +24,8 @@ export interface AppConfig {
   wsUrl: string;
   wsVersion: string;
   sendTimeoutMs: number;
+  uploadUrl: string;
+  uploadTimeoutMs: number;
   gotifyTokens: Record<string, CmccAccount>;
   webhookSecrets: Record<string, CmccAccount>;
   databasePath: string;
@@ -40,6 +42,10 @@ export function loadConfig(): AppConfig {
   if (!z.string().url().safeParse(wsUrl).success || !/^wss?:\/\//.test(wsUrl)) throw new Error('CMCC_WS_URL must be a ws or wss URL');
   const sendTimeoutMs = Number(process.env.CMCC_SEND_TIMEOUT_MS ?? 10000);
   if (!Number.isInteger(sendTimeoutMs) || sendTimeoutMs < 1000 || sendTimeoutMs > 120000) throw new Error('CMCC_SEND_TIMEOUT_MS must be 1000-120000');
+  const uploadUrl = process.env.CMCC_UPLOAD_URL ?? 'https://5gvas01.cmicmaap.com/gtw-ai/openclaw/api';
+  if (!z.string().url().safeParse(uploadUrl).success || !/^https?:\/\//.test(uploadUrl)) throw new Error('CMCC_UPLOAD_URL must be an http or https URL');
+  const uploadTimeoutMs = Number(process.env.CMCC_UPLOAD_TIMEOUT_MS ?? 120000);
+  if (!Number.isInteger(uploadTimeoutMs) || uploadTimeoutMs < 1000 || uploadTimeoutMs > 600000) throw new Error('CMCC_UPLOAD_TIMEOUT_MS must be 1000-600000');
   const adminUsername = process.env.ADMIN_USERNAME;
   const adminPassword = process.env.ADMIN_PASSWORD;
   const encryptionKey = process.env.CONFIG_ENCRYPTION_KEY;
@@ -52,6 +58,8 @@ export function loadConfig(): AppConfig {
     wsUrl,
     wsVersion: process.env.CMCC_WS_VERSION ?? '2.0',
     sendTimeoutMs,
+    uploadUrl,
+    uploadTimeoutMs,
     gotifyTokens: parseMap('CMCC_TOKEN_MAP'),
     webhookSecrets: parseMap('CMCC_WEBHOOK_SECRETS'),
     databasePath: process.env.CMCC_DATABASE_PATH ?? './data/cmcc-webhook.sqlite',

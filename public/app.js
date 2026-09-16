@@ -5,7 +5,7 @@ const $$ = selector => [...document.querySelectorAll(selector)];
 
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
-  if (options.body && !headers['Content-Type']) {
+  if (options.body && !(options.body instanceof FormData) && !headers['Content-Type']) {
     headers['Content-Type'] = 'application/json';
   }
   const response = await fetch(path, { ...options, headers });
@@ -155,15 +155,43 @@ $('#credential-form').addEventListener('submit', async event => {
   }
 });
 
+function syncPushMode() {
+  const form = $('#push-form');
+  const mediaMode = form.elements.pushMode?.value === 'media';
+  $('#manual-media-fields').hidden = !mediaMode;
+  form.elements.message.required = !mediaMode;
+  $('#message-required').textContent = mediaMode ? '可选' : '*';
+  $('#message-required').className = mediaMode ? 'optional' : 'required';
+}
+
+$$('input[name="pushMode"]').forEach(input => input.addEventListener('change', syncPushMode));
+
 $('#push-form').addEventListener('submit', async event => {
   event.preventDefault();
   const form = event.currentTarget;
   const title = form.elements.title?.value?.trim() ?? '';
   const message = form.elements.message?.value?.trim() ?? '';
+  const mediaMode = form.elements.pushMode?.value === 'media';
+  const mediaType = form.elements.mediaType?.value;
+  const mediaFile = form.elements.mediaFile?.files?.[0];
+  const mediaUrl = form.elements.mediaUrl?.value?.trim() ?? '';
   const upstreamIds = $$('input[name="manualUpstreamIds"]:checked').map(input => Number(input.value));
-  if (!message) {
+  if (!mediaMode && !message) {
     showMessage('#push-message', '请输入消息内容。');
     form.elements.message?.focus();
+    return;
+  }
+  if (mediaMode && !mediaFile && !mediaUrl) {
+    showMessage('#push-message', '请选择本地文件或填写远程媒体 URL。');
+    form.elements.mediaFile?.focus();
+    return;
+  }
+  if (mediaFile && mediaUrl) {
+    showMessage('#push-message', '本地文件与远程媒体 URL 只能选择一项。');
+    return;
+  }
+  if (mediaFile && mediaFile.size > 200 * 1024 * 1024) {
+    showMessage('#push-message', '文件不能超过 200MB。');
     return;
   }
   if (!upstreamIds.length) {
@@ -172,13 +200,29 @@ $('#push-form').addEventListener('submit', async event => {
   }
   const button = $('#push-submit');
   button.disabled = true;
-  showMessage('#push-message', '正在投递通知…');
+  showMessage('#push-message', mediaFile ? '正在上传并提交消息…' : '正在提交消息…');
   try {
-    const payload = { message, upstreamIds };
-    if (title) payload.title = title;
-    const result = await api('/admin/api/push', { method:'POST', body:JSON.stringify(payload) });
+    let body;
+    if (mediaFile) {
+      body = new FormData();
+      body.append('upstreamIds', JSON.stringify(upstreamIds));
+      body.append('mediaType', mediaType);
+      body.append('file', mediaFile, mediaFile.name);
+      if (title) body.append('title', title);
+      if (message) body.append('message', message);
+    } else {
+      const payload = { message, upstreamIds };
+      if (title) payload.title = title;
+      if (mediaMode) {
+        payload.mediaType = mediaType;
+        payload.mediaUrl = mediaUrl;
+      }
+      body = JSON.stringify(payload);
+    }
+    const result = await api('/admin/api/push', { method:'POST', body });
     form.reset();
-    showMessage('#push-message', `通知已发送至 ${result.results.length} 个上游。`, true);
+    syncPushMode();
+    showMessage('#push-message', `已向 ${result.results.length} 个上游提交 ${result.messageIds.length} 条消息。`, true);
     await refreshAll();
   } catch (error) {
     showMessage('#push-message', error.message);
@@ -246,4 +290,5 @@ $('#approve-confirm').addEventListener('click', async () => {
 });
 $('#confirm-dialog').addEventListener('close', () => { pendingConfirmation = null; });
 $('#logout-button').addEventListener('click', async () => { await api('/admin/api/logout', { method:'POST' }); location.reload(); });
+syncPushMode();
 authenticate();

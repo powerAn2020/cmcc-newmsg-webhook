@@ -1,6 +1,22 @@
 import type { MediaType, NativeSendRequest } from './types.js';
 
 const types = new Set<MediaType>(['IMAGE', 'TEXT', 'AUDIO', 'VIDEO', 'FILE']);
+export const MAX_MEDIA_BYTES = 200 * 1024 * 1024;
+
+export function inferMediaType(fileName: string, mimeType = ''): MediaType {
+  const mime = mimeType.toLowerCase();
+  if (mime.startsWith('image/')) return 'IMAGE';
+  if (mime.startsWith('audio/')) return 'AUDIO';
+  if (mime.startsWith('video/')) return 'VIDEO';
+  if (mime.startsWith('text/')) return 'TEXT';
+
+  const extension = fileName.split('.').pop()?.toLowerCase();
+  if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'].includes(extension ?? '')) return 'IMAGE';
+  if (['mp3', 'wav', 'aac', 'm4a', 'ogg', 'amr'].includes(extension ?? '')) return 'AUDIO';
+  if (['mp4', 'webm', '3gp', 'mov', 'avi'].includes(extension ?? '')) return 'VIDEO';
+  if (['txt', 'md'].includes(extension ?? '')) return 'TEXT';
+  return 'FILE';
+}
 
 function isPrivateHost(hostname: string): boolean {
   const h = hostname.toLowerCase();
@@ -23,6 +39,6 @@ export function validateMedia(body: NativeSendRequest): string | undefined {
     } catch { return 'thumbnailUrl must be a valid URL'; }
   }
   if (!body.mediaType || !types.has(body.mediaType)) return 'mediaType is required and must be IMAGE, TEXT, AUDIO, VIDEO, or FILE';
-  if (body.mediaSize !== undefined && (!Number.isInteger(body.mediaSize) || body.mediaSize < 0 || body.mediaSize > 200 * 1024 * 1024)) return 'mediaSize must be between 0 and 209715200';
+  if (body.mediaSize !== undefined && (!Number.isInteger(body.mediaSize) || body.mediaSize < 0 || body.mediaSize > MAX_MEDIA_BYTES)) return `mediaSize must be between 0 and ${MAX_MEDIA_BYTES}`;
   return undefined;
 }
