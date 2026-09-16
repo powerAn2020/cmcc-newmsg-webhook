@@ -12,13 +12,27 @@ function now(): string { return new Date().toISOString(); }
 export class Store {
   private readonly db: DatabaseSync;
   private readonly key: Buffer;
+  private loginFailLimit: number;
+  private loginFailWindowMs: number;
+  private loginBanDurationMs: number;
 
-  constructor(databasePath: string, encryptionKey: string) {
+  constructor(
+    databasePath: string,
+    encryptionKey: string,
+    options?: {
+      loginFailLimit?: number;
+      loginFailWindowMs?: number;
+      loginBanDurationMs?: number;
+    }
+  ) {
     fs.mkdirSync(path.dirname(path.resolve(databasePath)), { recursive: true });
     this.db = new DatabaseSync(databasePath);
     this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec('PRAGMA foreign_keys = ON');
     this.key = crypto.createHash('sha256').update(encryptionKey).digest();
+    this.loginFailLimit = options?.loginFailLimit ?? 5;
+    this.loginFailWindowMs = options?.loginFailWindowMs ?? 15 * 60_000;
+    this.loginBanDurationMs = options?.loginBanDurationMs ?? 30 * 60_000;
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS upstreams (
         id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, api_key TEXT NOT NULL,
@@ -153,11 +167,16 @@ export class Store {
     if (!row?.locked_until || Date.parse(row.locked_until) <= Date.now()) return { allowed: true };
     return { allowed: false, retryAfter: Math.ceil((Date.parse(row.locked_until) - Date.now()) / 1000) };
   }
+  updateBruteForceOptions(options: { loginFailLimit?: number; loginFailWindowMs?: number; loginBanDurationMs?: number }) {
+    if (options.loginFailLimit !== undefined) this.loginFailLimit = options.loginFailLimit;
+    if (options.loginFailWindowMs !== undefined) this.loginFailWindowMs = options.loginFailWindowMs;
+    if (options.loginBanDurationMs !== undefined) this.loginBanDurationMs = options.loginBanDurationMs;
+  }
   recordLoginFailure(ip: string) {
     const row = this.db.prepare('SELECT * FROM login_attempts WHERE ip = ?').get(ip) as { failed_count: number; first_failed_at: string } | undefined;
-    const first = row && Date.now() - Date.parse(row.first_failed_at) < 15 * 60_000 ? row.first_failed_at : now();
+    const first = row && Date.now() - Date.parse(row.first_failed_at) < this.loginFailWindowMs ? row.first_failed_at : now();
     const count = first === row?.first_failed_at ? row.failed_count + 1 : 1;
-    const lock = count >= 5 ? new Date(Date.now() + 30 * 60_000).toISOString() : null;
+    const lock = count >= this.loginFailLimit ? new Date(Date.now() + this.loginBanDurationMs).toISOString() : null;
     this.db.prepare(`INSERT INTO login_attempts (ip, failed_count, first_failed_at, locked_until) VALUES (?, ?, ?, ?)
       ON CONFLICT(ip) DO UPDATE SET failed_count = excluded.failed_count, first_failed_at = excluded.first_failed_at, locked_until = excluded.locked_until`).run(ip, count, first, lock);
   }

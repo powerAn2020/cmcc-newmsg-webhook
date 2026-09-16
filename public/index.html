@@ -37,6 +37,7 @@
           <button class="nav-item" data-view="credentials">接口鉴权</button>
           <button class="nav-item" data-view="manual">手动推送</button>
           <button class="nav-item" data-view="history">发送记录</button>
+          <button class="nav-item" data-view="settings">系统设置</button>
         </nav>
         <div class="sidebar-footer"><span id="operator-name"></span><button id="logout-button" class="text-button" type="button">退出登录</button></div>
       </aside>
@@ -78,6 +79,94 @@
         <section id="history" class="view" aria-labelledby="history-title">
           <div class="section-heading history-heading"><div><p class="eyebrow">DELIVERY HISTORY</p><h3 id="history-title">发送记录</h3><p>每个绑定上游都会生成独立记录，最多显示最近 500 条。</p></div><button id="refresh-history" class="button secondary" type="button">刷新记录</button></div>
           <article class="history-panel"><div class="history-table-wrap"><table><thead><tr><th>时间</th><th>入口</th><th>上游通道</th><th>内容</th><th>状态</th><th>结果</th></tr></thead><tbody id="history-list"></tbody></table></div><p id="history-empty" class="empty-state" hidden>暂无发送记录。</p></article>
+        </section>
+
+        <section id="settings" class="view" aria-labelledby="settings-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">SYSTEM CONFIGURATION</p>
+              <h3 id="settings-title">系统参数设置</h3>
+              <p>调整系统核心参数。保存后，设置将写入 .env 并即时生效。</p>
+            </div>
+          </div>
+          <article class="tool-panel">
+            <form id="settings-form" novalidate style="display: flex; flex-direction: column; gap: 24px;">
+              <fieldset style="border: 1px solid var(--line); border-radius: 6px; padding: 20px; background: rgba(0,0,0,0.01);">
+                <legend style="font-weight: bold; padding: 0 10px; color: #126d68;">管理员账号设置</legend>
+                <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; margin-top: 10px;">
+                  <label>
+                    管理员用户名 <span class="required">*</span>
+                    <input name="adminUsername" type="text" autocomplete="username" required />
+                    <span class="help-text">登录管理控制台所使用的用户名</span>
+                  </label>
+                  <label>
+                    管理员密码 <span class="optional">留空保持不变</span>
+                    <input name="adminPassword" type="password" autocomplete="new-password" placeholder="留空则保持原密码" />
+                    <span class="help-text">设置新的登录密码（留空不修改）</span>
+                  </label>
+                </div>
+              </fieldset>
+
+              <fieldset style="border: 1px solid var(--line); border-radius: 6px; padding: 20px; background: rgba(0,0,0,0.01);">
+                <legend style="font-weight: bold; padding: 0 10px; color: #126d68;">后台防暴力破解安全设置</legend>
+                <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; margin-top: 10px;">
+                  <label>
+                    最大登录失败次数 <span class="required">*</span>
+                    <input name="adminLoginFailLimit" type="number" min="1" step="1" required />
+                    <span class="help-text">超过此次数将对该 IP 进行封禁（默认：5 次）</span>
+                  </label>
+                  <label>
+                    失败统计观测窗口 (分钟) <span class="required">*</span>
+                    <input name="adminLoginFailWindowMin" type="number" min="1" step="1" required />
+                    <span class="help-text">统计时间窗口（默认：15 分钟）</span>
+                  </label>
+                  <label>
+                    封禁时长 (分钟) <span class="required">*</span>
+                    <input name="adminLoginBanDurationMin" type="number" min="1" step="1" required />
+                    <span class="help-text">触发后限制登录时间（默认：30 分钟）</span>
+                  </label>
+                </div>
+              </fieldset>
+
+              <fieldset style="border: 1px solid var(--line); border-radius: 6px; padding: 20px; background: rgba(0,0,0,0.01);">
+                <legend style="font-weight: bold; padding: 0 10px; color: #126d68;">CMCC 信道与通信设置</legend>
+                <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; margin-top: 10px;">
+                  <label style="grid-column: span 2;">
+                    WebSocket 接入 URL <span class="required">*</span>
+                    <input name="wsUrl" type="url" required />
+                    <span class="help-text">信道 WebSocket 服务端地址</span>
+                  </label>
+                  <label>
+                    协议版本 <span class="required">*</span>
+                    <input name="wsVersion" required />
+                    <span class="help-text">当前信道协议版本</span>
+                  </label>
+                </div>
+                <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; margin-top: 20px;">
+                  <label style="grid-column: span 2;">
+                    富媒体上传 URL <span class="required">*</span>
+                    <input name="uploadUrl" type="url" required />
+                    <span class="help-text">富媒体文件上传 HTTP 接口地址</span>
+                  </label>
+                  <label>
+                    发送超时 (毫秒) <span class="required">*</span>
+                    <input name="sendTimeoutMs" type="number" min="1000" max="120000" required />
+                    <span class="help-text">最长等待：10000 毫秒 = 10秒</span>
+                  </label>
+                  <label>
+                    上传超时 (毫秒) <span class="required">*</span>
+                    <input name="uploadTimeoutMs" type="number" min="1000" max="600000" required />
+                    <span class="help-text">最长等待：120000 毫秒 = 2分钟</span>
+                  </label>
+                </div>
+              </fieldset>
+
+              <div>
+                <p id="settings-message" class="form-message" role="status"></p>
+                <button class="button primary" type="submit" style="width: auto; padding: 10px 28px;">保存系统设置</button>
+              </div>
+            </form>
+          </article>
         </section>
       </section>
     </main>

@@ -22,6 +22,20 @@ describe('SQLite store', () => {
     store.close();
   });
 
+  it('respects custom login failure limit and ban duration', () => {
+    const store = new Store(':memory:', 'test-encryption-key', {
+      loginFailLimit: 2,
+      loginFailWindowMs: 5000,
+      loginBanDurationMs: 10000
+    });
+    store.recordLoginFailure('127.0.0.1');
+    expect(store.loginAllowed('127.0.0.1').allowed).toBe(true);
+    store.recordLoginFailure('127.0.0.1');
+    expect(store.loginAllowed('127.0.0.1').allowed).toBe(false);
+    expect(store.loginAllowed('127.0.0.1').retryAfter).toBeGreaterThan(0);
+    store.close();
+  });
+
   it('deletes upstreams and cascades their credential bindings', () => {
     const store = new Store(':memory:', 'test-encryption-key');
     const upstream = store.addUpstream('delete-me', 'ak_delete');

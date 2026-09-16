@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { z } from 'zod';
 import type { CmccAccount } from './types.js';
 
@@ -33,6 +34,11 @@ export interface AppConfig {
   adminPassword: string;
   encryptionKey: string;
   cookieSecure: boolean;
+  adminLoginFailLimit: number;
+  adminLoginFailWindowMin: number;
+  adminLoginFailWindowMs: number;
+  adminLoginBanDurationMin: number;
+  adminLoginBanDurationMs: number;
 }
 
 export function loadConfig(): AppConfig {
@@ -52,6 +58,42 @@ export function loadConfig(): AppConfig {
   if (!adminUsername || !adminPassword || !encryptionKey) {
     throw new Error('ADMIN_USERNAME, ADMIN_PASSWORD, and CONFIG_ENCRYPTION_KEY are required');
   }
+
+  const adminLoginFailLimit = Number(process.env.ADMIN_LOGIN_FAIL_LIMIT ?? 5);
+  if (!Number.isInteger(adminLoginFailLimit) || adminLoginFailLimit < 1) {
+    throw new Error('ADMIN_LOGIN_FAIL_LIMIT must be a positive integer');
+  }
+
+  let adminLoginFailWindowMin = 15;
+  if (process.env.ADMIN_LOGIN_FAIL_WINDOW_MIN !== undefined) {
+    adminLoginFailWindowMin = Number(process.env.ADMIN_LOGIN_FAIL_WINDOW_MIN);
+    if (!Number.isInteger(adminLoginFailWindowMin) || adminLoginFailWindowMin < 1) {
+      throw new Error('ADMIN_LOGIN_FAIL_WINDOW_MIN must be a positive integer (minutes)');
+    }
+  } else if (process.env.ADMIN_LOGIN_FAIL_WINDOW_MS !== undefined) {
+    const ms = Number(process.env.ADMIN_LOGIN_FAIL_WINDOW_MS);
+    if (!Number.isInteger(ms) || ms < 1000) {
+      throw new Error('ADMIN_LOGIN_FAIL_WINDOW_MS must be at least 1000');
+    }
+    adminLoginFailWindowMin = Math.max(1, Math.round(ms / 60000));
+  }
+  const adminLoginFailWindowMs = adminLoginFailWindowMin * 60_000;
+
+  let adminLoginBanDurationMin = 30;
+  if (process.env.ADMIN_LOGIN_BAN_DURATION_MIN !== undefined) {
+    adminLoginBanDurationMin = Number(process.env.ADMIN_LOGIN_BAN_DURATION_MIN);
+    if (!Number.isInteger(adminLoginBanDurationMin) || adminLoginBanDurationMin < 1) {
+      throw new Error('ADMIN_LOGIN_BAN_DURATION_MIN must be a positive integer (minutes)');
+    }
+  } else if (process.env.ADMIN_LOGIN_BAN_DURATION_MS !== undefined) {
+    const ms = Number(process.env.ADMIN_LOGIN_BAN_DURATION_MS);
+    if (!Number.isInteger(ms) || ms < 1000) {
+      throw new Error('ADMIN_LOGIN_BAN_DURATION_MS must be at least 1000');
+    }
+    adminLoginBanDurationMin = Math.max(1, Math.round(ms / 60000));
+  }
+  const adminLoginBanDurationMs = adminLoginBanDurationMin * 60_000;
+
   return {
     host: process.env.HOST ?? '0.0.0.0',
     port,
@@ -66,10 +108,44 @@ export function loadConfig(): AppConfig {
     adminUsername,
     adminPassword,
     encryptionKey,
-    cookieSecure: process.env.ADMIN_COOKIE_SECURE === 'true'
+    cookieSecure: process.env.ADMIN_COOKIE_SECURE === 'true',
+    adminLoginFailLimit,
+    adminLoginFailWindowMin,
+    adminLoginFailWindowMs,
+    adminLoginBanDurationMin,
+    adminLoginBanDurationMs
   };
 }
 
 export function maskSecret(value: string): string {
   return value.length <= 6 ? '***' : `${value.slice(0, 3)}***${value.slice(-3)}`;
+}
+
+export function updateEnvFile(updates: Record<string, string | number>) {
+  const envPath = '.env';
+  if (!fs.existsSync(envPath)) {
+    const content = Object.entries(updates).map(([k, v]) => `${k}=${v}`).join('\n') + '\n';
+    fs.writeFileSync(envPath, content, 'utf8');
+    return;
+  }
+  let content = fs.readFileSync(envPath, 'utf8');
+
+  // Migrate legacy _MS keys to _MIN if present
+  if ('ADMIN_LOGIN_FAIL_WINDOW_MIN' in updates) {
+    content = content.replace(/^ADMIN_LOGIN_FAIL_WINDOW_MS=.*$\n?/m, '');
+  }
+  if ('ADMIN_LOGIN_BAN_DURATION_MIN' in updates) {
+    content = content.replace(/^ADMIN_LOGIN_BAN_DURATION_MS=.*$\n?/m, '');
+  }
+
+  for (const [key, value] of Object.entries(updates)) {
+    const regex = new RegExp(`^${key}=.*$`, 'm');
+    if (regex.test(content)) {
+      content = content.replace(regex, `${key}=${value}`);
+    } else {
+      if (content && !content.endsWith('\n')) content += '\n';
+      content += `${key}=${value}\n`;
+    }
+  }
+  fs.writeFileSync(envPath, content, 'utf8');
 }

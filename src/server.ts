@@ -11,13 +11,14 @@ import cookie from '@fastify/cookie';
 import multipart from '@fastify/multipart';
 import sensible from '@fastify/sensible';
 import fastifyStatic from '@fastify/static';
-import { loadConfig, maskSecret, type AppConfig } from './config.js';
+import { z } from 'zod';
+import { loadConfig, maskSecret, updateEnvFile, type AppConfig } from './config.js';
 import { CmccClientPool } from './cmcc-client.js';
 import { CmccUploader } from './cmcc-upload.js';
-import { inferMediaType, MAX_MEDIA_BYTES, validateMedia } from './media.js';
+import { downloadRemoteMedia, inferMediaType, isCmccMediaUrl, MAX_MEDIA_BYTES, validateMedia, type StagedMediaFile } from './media.js';
 import { Store } from './store.js';
 import { chunkText, markdownToPlainText } from './text.js';
-import type { CmccAccount, CredentialKind, GotifyRequest, NativeSendRequest } from './types.js';
+import type { CmccAccount, CredentialKind, GotifyRequest, MediaType, NativeSendRequest } from './types.js';
 
 const sessionCookie = 'cmcc_admin_session';
 const publicRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../public');
@@ -36,9 +37,11 @@ function payloadFor(body: NativeSendRequest, account?: CmccAccount): Omit<Native
 function gotifyPayload(body: GotifyRequest, account?: CmccAccount): NativeSendRequest {
   const title = typeof body.title === 'string' ? body.title : '';
   const media = (body.extras as Record<string, any> | undefined)?.['cmcc-newmsg'];
-  if (media?.mediaUrl) {
+  if (media?.mediaUrl || media?.mediaType) {
+    const rawContent = typeof media.content === 'string' ? media.content : body.message;
+    const content = title ? `${title}${rawContent ? `\n${rawContent}` : ''}` : rawContent;
     return {
-      type: 'send', to: account?.defaultTo, content: typeof media.content === 'string' ? media.content : body.message,
+      type: 'send', to: account?.defaultTo, content: content || undefined,
       mediaType: media.mediaType, mediaUrl: media.mediaUrl, thumbnailUrl: media.thumbnailUrl,
       mediaFileName: media.mediaFileName, mediaSize: media.mediaSize, mediaMimeType: media.mediaMimeType
     };
@@ -98,7 +101,7 @@ function parseUpstreamIds(raw: unknown): number[] {
   return [...new Set(value.map(Number))];
 }
 
-async function readManualMultipart(request: FastifyRequest): Promise<{ body: ManualPushBody; file?: StagedFile }> {
+async function readMultipartRequest(request: FastifyRequest): Promise<{ fields: Record<string, string>; file?: StagedFile }> {
   const fields: Record<string, string> = {};
   let file: StagedFile | undefined;
   let pendingPath: string | undefined;
@@ -118,20 +121,27 @@ async function readManualMultipart(request: FastifyRequest): Promise<{ body: Man
       file = { path: filePath, name, size: info.size, mimeType: part.mimetype };
       pendingPath = undefined;
     }
-    return {
-      body: {
-        title: fields.title,
-        message: fields.message,
-        upstreamIds: parseUpstreamIds(fields.upstreamIds),
-        mediaType: fields.mediaType as NativeSendRequest['mediaType'] | undefined
-      },
-      file
-    };
+    return { fields, file };
   } catch (error) {
     if (file) await unlink(file.path).catch(() => undefined);
     if (pendingPath) await unlink(pendingPath).catch(() => undefined);
     throw error;
   }
+}
+
+async function readManualMultipart(request: FastifyRequest): Promise<{ body: ManualPushBody; file?: StagedFile }> {
+  const { fields, file } = await readMultipartRequest(request);
+  return {
+    body: {
+      title: fields.title,
+      message: fields.message,
+      upstreamIds: parseUpstreamIds(fields.upstreamIds),
+      mediaType: fields.mediaType as NativeSendRequest['mediaType'] | undefined,
+      mediaUrl: fields.mediaUrl,
+      thumbnailUrl: fields.thumbnailUrl
+    },
+    file
+  };
 }
 
 export async function createApp(config = loadConfig(), services: AppServices = {}): Promise<FastifyInstance> {
@@ -158,7 +168,11 @@ export async function createApp(config = loadConfig(), services: AppServices = {
   await app.register(sensible);
   await app.register(fastifyStatic, { root: publicRoot, prefix: '/', index: ['index.html'] });
 
-  const store = new Store(config.databasePath, config.encryptionKey);
+  const store = new Store(config.databasePath, config.encryptionKey, {
+    loginFailLimit: config.adminLoginFailLimit,
+    loginFailWindowMs: config.adminLoginFailWindowMs,
+    loginBanDurationMs: config.adminLoginBanDurationMs
+  });
   const pool = services.pool ?? new CmccClientPool(config.wsUrl, config.wsVersion, config.sendTimeoutMs);
   const uploader = services.uploader ?? new CmccUploader(config.uploadUrl, config.uploadTimeoutMs);
   app.addHook('onClose', async () => { pool.close(); store.close(); });
@@ -184,29 +198,144 @@ export async function createApp(config = loadConfig(), services: AppServices = {
         for (const outgoing of outgoingPayloads(payload)) {
           const messageId = await pool.send({ apiKey: upstream.apiKey }, outgoing);
           messageIds.push(messageId);
-          store.addHistory({ source, credentialId: target.credentialId, upstreamId: upstream.id, status: 'success', title, content: outgoing.content ?? null, mediaType: outgoing.mediaType ?? null, messageId, error: null });
+          store.addHistory({ source, credentialId: target.credentialId, upstreamId: upstream.id, status: 'success', title, content: outgoing.content ?? outgoing.mediaUrl ?? null, mediaType: outgoing.mediaType ?? null, messageId, error: null });
         }
         return { upstreamId: upstream.id, upstreamName: upstream.name, ok: true as const, messageId: messageIds[0], messageIds };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        store.addHistory({ source, credentialId: target.credentialId, upstreamId: upstream.id, status: 'failed', title, content: payload.content ?? null, mediaType: payload.mediaType ?? null, messageId: null, error: message });
+        store.addHistory({ source, credentialId: target.credentialId, upstreamId: upstream.id, status: 'failed', title, content: payload.content ?? payload.mediaUrl ?? null, mediaType: payload.mediaType ?? null, messageId: null, error: message });
         return { upstreamId: upstream.id, upstreamName: upstream.name, ok: false as const, error: message, messageIds };
       }
     }));
   }
 
-  app.get('/healthz', async () => ({ ok: true }));
+  async function handleDispatchWithMedia(
+    source: CredentialKind | 'manual',
+    target: DispatchTarget,
+    body: NativeSendRequest,
+    title: string | null,
+    localFile?: StagedFile
+  ) {
+    const basePayload = payloadFor(body);
+    let tempRemoteFile: StagedMediaFile | undefined;
+
+    try {
+      let staged: StagedMediaFile | StagedFile | undefined = localFile;
+      if (!staged && basePayload.mediaUrl && !isCmccMediaUrl(basePayload.mediaUrl, config.uploadUrl)) {
+        staged = await downloadRemoteMedia(basePayload.mediaUrl, basePayload.mediaType, config.uploadTimeoutMs);
+        tempRemoteFile = staged;
+      }
+
+      const prepare = staged
+        ? async (upstream: Upstream, base: Omit<NativeSendRequest, 'apiKey'>) => ({
+            ...base,
+            mediaUrl: await uploader.upload(upstream.apiKey, staged!.path, staged!.name),
+            mediaFileName: staged!.name,
+            mediaSize: staged!.size,
+            mediaMimeType: staged!.mimeType,
+            timestamp: Date.now()
+          })
+        : undefined;
+
+      return await dispatch(source, target, body, title, prepare);
+    } finally {
+      if (tempRemoteFile) {
+        await unlink(tempRemoteFile.path).catch(() => undefined);
+      }
+      if (localFile) {
+        await unlink(localFile.path).catch(() => undefined);
+      }
+    }
+  }
+
+  app.get('/healthz', async (request, reply) => {
+    const sessionId = request.cookies[sessionCookie];
+    if (sessionId && store.hasSession(sessionId)) {
+      return { ok: true };
+    }
+
+    const authorization = request.headers.authorization;
+    if (authorization?.startsWith('Bearer ')) {
+      const secret = authorization.slice(7).trim();
+      if (secret && (store.findCredential('webhook', secret) || store.findCredential('gotify', secret))) {
+        return { ok: true };
+      }
+    }
+
+    const gotifyKey = request.headers['x-gotify-key'];
+    if (typeof gotifyKey === 'string' && gotifyKey.trim()) {
+      if (store.findCredential('gotify', gotifyKey.trim())) {
+        return { ok: true };
+      }
+    }
+
+    const queryToken = (request.query as { token?: string } | undefined)?.token;
+    if (typeof queryToken === 'string' && queryToken.trim()) {
+      const token = queryToken.trim();
+      if (store.findCredential('gotify', token) || store.findCredential('webhook', token)) {
+        return { ok: true };
+      }
+    }
+
+    return reply.code(404).send({ error: 'Not Found' });
+  });
 
   app.post<{ Querystring: { token?: string }; Body: GotifyRequest }>('/message', async (request, reply) => {
-    const token = request.query.token;
+    const token =
+      request.query.token ||
+      (typeof request.headers['x-gotify-key'] === 'string' ? request.headers['x-gotify-key'] : undefined) ||
+      (request.headers.authorization?.startsWith('Bearer ') ? request.headers.authorization.slice(7).trim() : undefined);
     const credential = token ? store.findCredential('gotify', token) : undefined;
     if (!credential || credential.upstreams.length === 0) return reply.unauthorized('invalid or unbound Gotify token');
-    const body = request.body;
-    if (!body || typeof body.message !== 'string' || body.message.length === 0) return reply.badRequest('message is required');
+
+    let body: GotifyRequest;
+    let file: StagedFile | undefined;
+
+    if (request.isMultipart()) {
+      try {
+        const parsed = await readMultipartRequest(request);
+        file = parsed.file;
+        const msg = parsed.fields.message || '';
+        if (!msg && !file) {
+          return reply.badRequest('message or file is required');
+        }
+        const inferredType = file ? inferMediaType(file.name, file.mimeType) : undefined;
+        const mediaType = (parsed.fields.mediaType as MediaType) || inferredType;
+        body = {
+          title: parsed.fields.title,
+          message: msg,
+          priority: parsed.fields.priority ? Number(parsed.fields.priority) : undefined,
+          extras: {
+            'cmcc-newmsg': {
+              mediaType,
+              mediaUrl: parsed.fields.mediaUrl
+            }
+          }
+        };
+      } catch (err) {
+        if (file) await unlink(file.path).catch(() => undefined);
+        return reply.badRequest(err instanceof Error ? err.message : 'failed to parse multipart body');
+      }
+    } else {
+      body = request.body;
+      if (!body || typeof body.message !== 'string' || body.message.length === 0) return reply.badRequest('message is required');
+    }
+
     const payload = gotifyPayload(body);
     const mediaError = validateMedia(payload);
-    if (mediaError) return reply.badRequest(mediaError);
-    const results = await dispatch('gotify', { credentialId: credential.id, upstreams: credential.upstreams }, payload, body.title ?? null);
+    if (mediaError) {
+      if (file) await unlink(file.path).catch(() => undefined);
+      return reply.badRequest(mediaError);
+    }
+
+    let results: Awaited<ReturnType<typeof dispatch>>;
+    try {
+      results = await handleDispatchWithMedia('gotify', { credentialId: credential.id, upstreams: credential.upstreams }, payload, body.title ?? null, file);
+    } catch (error) {
+      if (file) await unlink(file.path).catch(() => undefined);
+      return reply.badRequest(error instanceof Error ? error.message : 'failed to process media');
+    }
+
     const success = results.filter(item => item.ok);
     if (success.length !== results.length) return reply.code(502).send({ error: 'one or more CMCC deliveries failed', results });
     return reply.send(gotifyResponse(body, success[0].messageId));
@@ -217,12 +346,55 @@ export async function createApp(config = loadConfig(), services: AppServices = {
     const secret = authorization?.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
     const credential = secret ? store.findCredential('webhook', secret) : undefined;
     if (!credential || credential.upstreams.length === 0) return reply.unauthorized('invalid or unbound webhook secret');
-    const body = request.body;
-    if (!body || body.type !== 'send') return reply.badRequest('type must be send');
-    const payload = payloadFor(body);
+
+    let payload: NativeSendRequest;
+    let file: StagedFile | undefined;
+
+    if (request.isMultipart()) {
+      try {
+        const parsed = await readMultipartRequest(request);
+        file = parsed.file;
+        const rawContent = parsed.fields.content || parsed.fields.message || '';
+        const mediaUrl = parsed.fields.mediaUrl;
+        if (!rawContent && !file && !mediaUrl) {
+          return reply.badRequest('content, file or mediaUrl is required');
+        }
+        const inferredType = file ? inferMediaType(file.name, file.mimeType) : undefined;
+        const mediaType = (parsed.fields.mediaType as MediaType) || inferredType;
+        payload = {
+          type: 'send',
+          content: rawContent || undefined,
+          mediaType,
+          mediaUrl,
+          thumbnailUrl: parsed.fields.thumbnailUrl,
+          mediaFileName: file?.name,
+          mediaSize: file?.size,
+          mediaMimeType: file?.mimeType
+        };
+      } catch (err) {
+        if (file) await unlink(file.path).catch(() => undefined);
+        return reply.badRequest(err instanceof Error ? err.message : 'failed to parse multipart body');
+      }
+    } else {
+      const body = request.body;
+      if (!body || body.type !== 'send') return reply.badRequest('type must be send');
+      payload = payloadFor(body);
+    }
+
     const mediaError = validateMedia(payload);
-    if (mediaError) return reply.badRequest(mediaError);
-    const results = await dispatch('webhook', { credentialId: credential.id, upstreams: credential.upstreams }, payload, null);
+    if (mediaError) {
+      if (file) await unlink(file.path).catch(() => undefined);
+      return reply.badRequest(mediaError);
+    }
+
+    let results: Awaited<ReturnType<typeof dispatch>>;
+    try {
+      results = await handleDispatchWithMedia('webhook', { credentialId: credential.id, upstreams: credential.upstreams }, payload, null, file);
+    } catch (error) {
+      if (file) await unlink(file.path).catch(() => undefined);
+      return reply.badRequest(error instanceof Error ? error.message : 'failed to process media');
+    }
+
     if (results.some(item => !item.ok)) return reply.code(502).send({ ok: false, results });
     return reply.send({ ok: true, messageIds: results.flatMap(item => item.messageIds), results });
   });
@@ -251,6 +423,163 @@ export async function createApp(config = loadConfig(), services: AppServices = {
     return { ok: true };
   });
   app.get('/admin/api/me', { preHandler: requireAdmin }, async () => ({ username: config.adminUsername }));
+
+  app.get('/admin/api/settings', { preHandler: requireAdmin }, async () => {
+    return {
+      adminUsername: config.adminUsername,
+      adminLoginFailLimit: config.adminLoginFailLimit,
+      adminLoginFailWindowMin: config.adminLoginFailWindowMin,
+      adminLoginBanDurationMin: config.adminLoginBanDurationMin,
+      adminLoginFailWindowMs: config.adminLoginFailWindowMs,
+      adminLoginBanDurationMs: config.adminLoginBanDurationMs,
+      wsUrl: config.wsUrl,
+      wsVersion: config.wsVersion,
+      sendTimeoutMs: config.sendTimeoutMs,
+      uploadUrl: config.uploadUrl,
+      uploadTimeoutMs: config.uploadTimeoutMs
+    };
+  });
+
+  app.post<{
+    Body: {
+      adminUsername?: string;
+      adminPassword?: string;
+      adminLoginFailLimit?: number;
+      adminLoginFailWindowMin?: number;
+      adminLoginFailWindowMs?: number;
+      adminLoginBanDurationMin?: number;
+      adminLoginBanDurationMs?: number;
+      wsUrl?: string;
+      wsVersion?: string;
+      sendTimeoutMs?: number;
+      uploadUrl?: string;
+      uploadTimeoutMs?: number;
+    };
+  }>('/admin/api/settings', { preHandler: requireAdmin }, async (request, reply) => {
+    const body = request.body ?? {};
+
+    if (body.adminUsername !== undefined) {
+      if (typeof body.adminUsername !== 'string' || body.adminUsername.trim().length === 0) {
+        return reply.badRequest('adminUsername cannot be empty');
+      }
+    }
+    if (body.adminPassword !== undefined) {
+      if (typeof body.adminPassword !== 'string' || body.adminPassword.trim().length === 0) {
+        return reply.badRequest('adminPassword cannot be empty');
+      }
+    }
+    if (body.adminLoginFailLimit !== undefined) {
+      if (!Number.isInteger(body.adminLoginFailLimit) || body.adminLoginFailLimit < 1) {
+        return reply.badRequest('ADMIN_LOGIN_FAIL_LIMIT must be a positive integer');
+      }
+    }
+    if (body.adminLoginFailWindowMin !== undefined) {
+      if (!Number.isInteger(body.adminLoginFailWindowMin) || body.adminLoginFailWindowMin < 1) {
+        return reply.badRequest('ADMIN_LOGIN_FAIL_WINDOW_MIN must be a positive integer (minutes)');
+      }
+    } else if (body.adminLoginFailWindowMs !== undefined) {
+      if (!Number.isInteger(body.adminLoginFailWindowMs) || body.adminLoginFailWindowMs < 1000) {
+        return reply.badRequest('ADMIN_LOGIN_FAIL_WINDOW_MS must be at least 1000');
+      }
+    }
+    if (body.adminLoginBanDurationMin !== undefined) {
+      if (!Number.isInteger(body.adminLoginBanDurationMin) || body.adminLoginBanDurationMin < 1) {
+        return reply.badRequest('ADMIN_LOGIN_BAN_DURATION_MIN must be a positive integer (minutes)');
+      }
+    } else if (body.adminLoginBanDurationMs !== undefined) {
+      if (!Number.isInteger(body.adminLoginBanDurationMs) || body.adminLoginBanDurationMs < 1000) {
+        return reply.badRequest('ADMIN_LOGIN_BAN_DURATION_MS must be at least 1000');
+      }
+    }
+    if (body.wsUrl !== undefined) {
+      if (!z.string().url().safeParse(body.wsUrl).success || !/^wss?:\/\//.test(body.wsUrl)) {
+        return reply.badRequest('CMCC_WS_URL must be a ws or wss URL');
+      }
+    }
+    if (body.wsVersion !== undefined) {
+      if (typeof body.wsVersion !== 'string' || body.wsVersion.trim().length === 0) {
+        return reply.badRequest('CMCC_WS_VERSION is required');
+      }
+    }
+    if (body.sendTimeoutMs !== undefined) {
+      if (!Number.isInteger(body.sendTimeoutMs) || body.sendTimeoutMs < 1000 || body.sendTimeoutMs > 120000) {
+        return reply.badRequest('CMCC_SEND_TIMEOUT_MS must be 1000-120000');
+      }
+    }
+    if (body.uploadUrl !== undefined) {
+      if (!z.string().url().safeParse(body.uploadUrl).success || !/^https?:\/\//.test(body.uploadUrl)) {
+        return reply.badRequest('CMCC_UPLOAD_URL must be an http or https URL');
+      }
+    }
+    if (body.uploadTimeoutMs !== undefined) {
+      if (!Number.isInteger(body.uploadTimeoutMs) || body.uploadTimeoutMs < 1000 || body.uploadTimeoutMs > 600000) {
+        return reply.badRequest('CMCC_UPLOAD_TIMEOUT_MS must be 1000-600000');
+      }
+    }
+
+    const envUpdates: Record<string, string | number> = {};
+
+    if (body.adminUsername !== undefined) {
+      config.adminUsername = body.adminUsername.trim();
+      envUpdates.ADMIN_USERNAME = config.adminUsername;
+    }
+    if (body.adminPassword !== undefined) {
+      config.adminPassword = body.adminPassword;
+      envUpdates.ADMIN_PASSWORD = config.adminPassword;
+    }
+    if (body.adminLoginFailLimit !== undefined) {
+      config.adminLoginFailLimit = body.adminLoginFailLimit;
+      envUpdates.ADMIN_LOGIN_FAIL_LIMIT = body.adminLoginFailLimit;
+    }
+    if (body.adminLoginFailWindowMin !== undefined) {
+      config.adminLoginFailWindowMin = body.adminLoginFailWindowMin;
+      config.adminLoginFailWindowMs = body.adminLoginFailWindowMin * 60_000;
+      envUpdates.ADMIN_LOGIN_FAIL_WINDOW_MIN = body.adminLoginFailWindowMin;
+    } else if (body.adminLoginFailWindowMs !== undefined) {
+      config.adminLoginFailWindowMs = body.adminLoginFailWindowMs;
+      config.adminLoginFailWindowMin = Math.round(body.adminLoginFailWindowMs / 60_000);
+      envUpdates.ADMIN_LOGIN_FAIL_WINDOW_MIN = config.adminLoginFailWindowMin;
+    }
+    if (body.adminLoginBanDurationMin !== undefined) {
+      config.adminLoginBanDurationMin = body.adminLoginBanDurationMin;
+      config.adminLoginBanDurationMs = body.adminLoginBanDurationMin * 60_000;
+      envUpdates.ADMIN_LOGIN_BAN_DURATION_MIN = body.adminLoginBanDurationMin;
+    } else if (body.adminLoginBanDurationMs !== undefined) {
+      config.adminLoginBanDurationMs = body.adminLoginBanDurationMs;
+      config.adminLoginBanDurationMin = Math.round(body.adminLoginBanDurationMs / 60_000);
+      envUpdates.ADMIN_LOGIN_BAN_DURATION_MIN = config.adminLoginBanDurationMin;
+    }
+    if (body.wsUrl !== undefined) {
+      config.wsUrl = body.wsUrl;
+      envUpdates.CMCC_WS_URL = body.wsUrl;
+    }
+    if (body.wsVersion !== undefined) {
+      config.wsVersion = body.wsVersion;
+      envUpdates.CMCC_WS_VERSION = body.wsVersion;
+    }
+    if (body.sendTimeoutMs !== undefined) {
+      config.sendTimeoutMs = body.sendTimeoutMs;
+      envUpdates.CMCC_SEND_TIMEOUT_MS = body.sendTimeoutMs;
+    }
+    if (body.uploadUrl !== undefined) {
+      config.uploadUrl = body.uploadUrl;
+      envUpdates.CMCC_UPLOAD_URL = body.uploadUrl;
+    }
+    if (body.uploadTimeoutMs !== undefined) {
+      config.uploadTimeoutMs = body.uploadTimeoutMs;
+      envUpdates.CMCC_UPLOAD_TIMEOUT_MS = body.uploadTimeoutMs;
+    }
+
+    store.updateBruteForceOptions({
+      loginFailLimit: config.adminLoginFailLimit,
+      loginFailWindowMs: config.adminLoginFailWindowMs,
+      loginBanDurationMs: config.adminLoginBanDurationMs
+    });
+
+    updateEnvFile(envUpdates);
+
+    return { ok: true };
+  });
 
   app.get('/admin/api/upstreams', { preHandler: requireAdmin }, async () => store.listUpstreams());
   app.post<{ Body: { name?: string; apiKey?: string } }>('/admin/api/upstreams', { preHandler: requireAdmin }, async (request, reply) => {
@@ -341,17 +670,17 @@ export async function createApp(config = loadConfig(), services: AppServices = {
     }
 
     try {
-      const results = await dispatch(
+      const results = await handleDispatchWithMedia(
         'manual',
         { upstreams: upstreams as Upstream[] },
         payload,
         title || null,
         input.file
-          ? async (upstream, base) => ({ ...base, mediaUrl: await uploader.upload(upstream.apiKey, input.file!.path, input.file!.name), timestamp: Date.now() })
-          : undefined
       );
       if (results.some(item => !item.ok)) return reply.code(502).send({ ok: false, results });
       return reply.send({ ok: true, messageIds: results.flatMap(item => item.messageIds), results });
+    } catch (error) {
+      return reply.badRequest(error instanceof Error ? error.message : 'failed to deliver media message');
     } finally {
       if (input.file) await unlink(input.file.path).catch(() => undefined);
     }

@@ -53,10 +53,32 @@ async function refreshAll() {
   renderUpstreams(); renderCredentials(); renderHistory();
 }
 
+async function loadAndPopulateSettings() {
+  try {
+    const settings = await api('/admin/api/settings');
+    const form = $('#settings-form');
+    form.elements.adminUsername.value = settings.adminUsername || '';
+    form.elements.adminPassword.value = '';
+    form.elements.adminLoginFailLimit.value = settings.adminLoginFailLimit;
+    form.elements.adminLoginFailWindowMin.value = settings.adminLoginFailWindowMin ?? Math.round((settings.adminLoginFailWindowMs || 900000) / 60000);
+    form.elements.adminLoginBanDurationMin.value = settings.adminLoginBanDurationMin ?? Math.round((settings.adminLoginBanDurationMs || 1800000) / 60000);
+    form.elements.wsUrl.value = settings.wsUrl;
+    form.elements.wsVersion.value = settings.wsVersion;
+    form.elements.uploadUrl.value = settings.uploadUrl;
+    form.elements.sendTimeoutMs.value = settings.sendTimeoutMs;
+    form.elements.uploadTimeoutMs.value = settings.uploadTimeoutMs;
+  } catch (error) {
+    showMessage('#settings-message', '加载系统参数失败：' + error.message);
+  }
+}
+
 function activateView(name) {
   $$('.nav-item').forEach(button => button.classList.toggle('active', button.dataset.view === name));
   $$('.view').forEach(view => view.classList.toggle('active', view.id === name));
-  $('#page-title').textContent = ({ overview:'概览', upstreams:'上游通道', credentials:'接口鉴权', manual:'手动推送', history:'发送记录' })[name];
+  $('#page-title').textContent = ({ overview:'概览', upstreams:'上游通道', credentials:'接口鉴权', manual:'手动推送', history:'发送记录', settings:'系统设置' })[name];
+  if (name === 'settings') {
+    loadAndPopulateSettings();
+  }
 }
 
 async function authenticate() {
@@ -290,5 +312,89 @@ $('#approve-confirm').addEventListener('click', async () => {
 });
 $('#confirm-dialog').addEventListener('close', () => { pendingConfirmation = null; });
 $('#logout-button').addEventListener('click', async () => { await api('/admin/api/logout', { method:'POST' }); location.reload(); });
+
+$('#settings-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const adminUsername = form.elements.adminUsername.value.trim();
+  const adminPassword = form.elements.adminPassword.value;
+  const adminLoginFailLimit = Number(form.elements.adminLoginFailLimit.value);
+  const adminLoginFailWindowMin = Number(form.elements.adminLoginFailWindowMin.value);
+  const adminLoginBanDurationMin = Number(form.elements.adminLoginBanDurationMin.value);
+  const wsUrl = form.elements.wsUrl.value.trim();
+  const wsVersion = form.elements.wsVersion.value.trim();
+  const uploadUrl = form.elements.uploadUrl.value.trim();
+  const sendTimeoutMs = Number(form.elements.sendTimeoutMs.value);
+  const uploadTimeoutMs = Number(form.elements.uploadTimeoutMs.value);
+
+  if (!adminUsername) {
+    showMessage('#settings-message', '管理员用户名不能为空。');
+    return;
+  }
+  if (!adminLoginFailLimit || adminLoginFailLimit < 1) {
+    showMessage('#settings-message', '登录失败次数必须是正整数。');
+    return;
+  }
+  if (!adminLoginFailWindowMin || adminLoginFailWindowMin < 1) {
+    showMessage('#settings-message', '统计观测窗口必须至少为 1 分钟。');
+    return;
+  }
+  if (!adminLoginBanDurationMin || adminLoginBanDurationMin < 1) {
+    showMessage('#settings-message', '封禁时长必须至少为 1 分钟。');
+    return;
+  }
+  if (!wsUrl || !/^wss?:\/\//.test(wsUrl)) {
+    showMessage('#settings-message', 'WebSocket 接入 URL 必须是有效的 ws 或 wss 地址。');
+    return;
+  }
+  if (!wsVersion) {
+    showMessage('#settings-message', '请输入协议版本。');
+    return;
+  }
+  if (!uploadUrl || !/^https?:\/\//.test(uploadUrl)) {
+    showMessage('#settings-message', '富媒体上传 URL 必须是有效的 http 或 https 地址。');
+    return;
+  }
+  if (!sendTimeoutMs || sendTimeoutMs < 1000 || sendTimeoutMs > 120000) {
+    showMessage('#settings-message', '发送超时必须在 1000 至 120000 毫秒之间。');
+    return;
+  }
+  if (!uploadTimeoutMs || uploadTimeoutMs < 1000 || uploadTimeoutMs > 600000) {
+    showMessage('#settings-message', '上传超时必须在 1000 至 600000 毫秒之间。');
+    return;
+  }
+
+  const button = form.querySelector('button[type="submit"]');
+  button.disabled = true;
+  showMessage('#settings-message', '正在保存系统参数…');
+  try {
+    const payload = {
+      adminUsername,
+      adminLoginFailLimit,
+      adminLoginFailWindowMin,
+      adminLoginBanDurationMin,
+      wsUrl,
+      wsVersion,
+      sendTimeoutMs,
+      uploadUrl,
+      uploadTimeoutMs
+    };
+    if (adminPassword) {
+      payload.adminPassword = adminPassword;
+    }
+    await api('/admin/api/settings', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    $('#operator-name').textContent = adminUsername;
+    form.elements.adminPassword.value = '';
+    showMessage('#settings-message', '系统参数设置已成功保存并生效！', true);
+  } catch (error) {
+    showMessage('#settings-message', error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
 syncPushMode();
 authenticate();
