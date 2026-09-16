@@ -1092,6 +1092,18 @@ export async function createApp(config = loadConfig(), services: AppServices = {
     return store.listSecurityAlerts(page, pageSize);
   });
 
+  app.post<{ Params: { id: string } }>('/admin/api/risks/alerts/:id/resolve', { preHandler: requireAdmin }, async (request, reply) => {
+    const id = Number(request.params.id);
+    if (!Number.isInteger(id)) return reply.badRequest('invalid alert id');
+    const resolved = store.resolveSecurityAlert(id);
+    return { ok: true, resolved };
+  });
+
+  app.post('/admin/api/risks/alerts/resolve-all', { preHandler: requireAdmin }, async () => {
+    const resolvedCount = store.resolveAllSecurityAlerts();
+    return { ok: true, resolvedCount };
+  });
+
   app.get<{ Querystring: { date?: string; page?: string; pageSize?: string } }>('/admin/api/risks/dangerous-logs', { preHandler: requireAdmin }, async request => {
     const date = request.query.date?.trim() || accessLogger.getTodayDate();
     const page = Math.max(1, Number(request.query.page) || 1);

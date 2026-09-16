@@ -149,16 +149,46 @@ export async function renderRiskAlerts(page = 1) {
       const statusBadge = item.status === 'success'
         ? '<span class="badge success">已通报</span>'
         : '<span class="badge failed">推送失败</span>';
+      const isHandled = !!item.handledAt;
+      const handledBadge = isHandled
+        ? '<span class="badge success">已排查</span>'
+        : '<span class="badge warning">待排查</span>';
+      const actionCell = isHandled
+        ? `<span style="color:var(--muted); font-size:12px;">已完成</span>`
+        : `<button class="button secondary compact resolve-alert-btn" data-id="${item.id}" type="button" style="font-size:12px; color:var(--teal); font-weight:700;">标为已排查</button>`;
+
       return `
         <tr>
           <td>${timeStr}</td>
           <td><strong style="color:var(--ink);">${escapeHtml(item.title || '系统告警')}</strong></td>
           <td class="content-cell" style="white-space: pre-line; font-size:12px;">${escapeHtml(item.content || '-')}</td>
-          <td>${escapeHtml(item.upstreamName || '全部广播')}</td>
+          <td>${handledBadge}</td>
           <td>${statusBadge}</td>
+          <td style="text-align: center;">${actionCell}</td>
         </tr>
       `;
     }).join('');
+
+    // 绑定单条标为已排查事件
+    tbody.querySelectorAll('.resolve-alert-btn').forEach(btn => {
+      btn.onclick = async () => {
+        const id = btn.dataset.id;
+        if (!id) return;
+        btn.disabled = true;
+        btn.textContent = '处理中...';
+        try {
+          await api(`/admin/api/risks/alerts/${encodeURIComponent(id)}/resolve`, { method: 'POST' });
+          await Promise.all([
+            renderRiskAlerts(riskState.alertsPage),
+            updateRiskSummaryAndBanner()
+          ]);
+        } catch (err) {
+          alert('操作失败: ' + (err instanceof Error ? err.message : String(err)));
+          btn.disabled = false;
+          btn.textContent = '标为已排查';
+        }
+      };
+    });
   } catch (err) {
     console.error('Failed to render risk alerts:', err);
   }
@@ -271,6 +301,28 @@ export function initRiskViewListeners() {
     };
   }
 
+  // 告警全部标为已排查
+  const resolveAllBtn = $('#risk-alerts-resolve-all-btn');
+  if (resolveAllBtn && !resolveAllBtn.dataset.bound) {
+    resolveAllBtn.dataset.bound = 'true';
+    resolveAllBtn.onclick = async () => {
+      resolveAllBtn.disabled = true;
+      resolveAllBtn.textContent = '处理中...';
+      try {
+        await api('/admin/api/risks/alerts/resolve-all', { method: 'POST' });
+        await Promise.all([
+          renderRiskAlerts(riskState.alertsPage),
+          updateRiskSummaryAndBanner()
+        ]);
+      } catch (err) {
+        alert('批量处理失败: ' + (err instanceof Error ? err.message : String(err)));
+      } finally {
+        resolveAllBtn.disabled = false;
+        resolveAllBtn.textContent = '✓ 全部标为已排查';
+      }
+    };
+  }
+
   // 全局警报 Banner 交互
   const dismissBtn = $('#risk-banner-dismiss');
   if (dismissBtn && !dismissBtn.dataset.bound) {
@@ -285,8 +337,22 @@ export function initRiskViewListeners() {
   if (actionBtn && !actionBtn.dataset.bound) {
     actionBtn.dataset.bound = 'true';
     actionBtn.onclick = () => {
+      // 标记收起并隐藏全局横条
+      riskState.bannerDismissed = true;
+      const banner = $('#global-risk-alert-banner');
+      if (banner) banner.hidden = true;
+
+      // 切换至异常风险页面
       const risksNav = $('.nav-item[data-view="risks"]');
       if (risksNav) risksNav.click();
+
+      // 平滑滚动定位至安全告警排查面板
+      setTimeout(() => {
+        const target = $('#risk-alerts-section') || $('#risk-bans-list');
+        if (target) {
+          target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      }, 150);
     };
   }
 }

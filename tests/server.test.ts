@@ -827,15 +827,42 @@ describe('admin push API', () => {
       });
       expect(bansAfter.json().items.some((item: any) => item.ip === badIp)).toBe(false);
 
-      // 4. Alerts endpoint
+      // 4. Alerts endpoint & resolution
       const alertsRes = await app.inject({
         method: 'GET',
         url: '/admin/api/risks/alerts?page=1&pageSize=10',
         headers: { cookie }
       });
       expect(alertsRes.statusCode).toBe(200);
-      expect(alertsRes.json()).toHaveProperty('items');
-      expect(alertsRes.json()).toHaveProperty('total');
+      const alerts = alertsRes.json();
+      expect(alerts).toHaveProperty('items');
+      expect(alerts).toHaveProperty('total');
+
+      if (alerts.items.length > 0) {
+        const firstId = alerts.items[0].id;
+        const resolveRes = await app.inject({
+          method: 'POST',
+          url: `/admin/api/risks/alerts/${firstId}/resolve`,
+          headers: { cookie }
+        });
+        expect(resolveRes.statusCode).toBe(200);
+        expect(resolveRes.json().ok).toBe(true);
+
+        const resolveAllRes = await app.inject({
+          method: 'POST',
+          url: '/admin/api/risks/alerts/resolve-all',
+          headers: { cookie }
+        });
+        expect(resolveAllRes.statusCode).toBe(200);
+        expect(resolveAllRes.json().ok).toBe(true);
+
+        const summaryAfter = await app.inject({
+          method: 'GET',
+          url: '/admin/api/risks/summary',
+          headers: { cookie }
+        });
+        expect(summaryAfter.json().todayAlertsCount).toBe(0);
+      }
 
       // 5. Dangerous logs endpoint
       const dangerousRes = await app.inject({

@@ -35,6 +35,8 @@ export interface IStore {
   listLockedIps(): { ip: string; failedCount: number; firstFailedAt: string; lockedUntil: string }[];
   unbanIp(ip: string): boolean;
   listSecurityAlerts(page?: number, pageSize?: number): { items: HistoryEntry[]; total: number; page: number; pageSize: number; totalPages: number };
+  resolveSecurityAlert(id: number): boolean;
+  resolveAllSecurityAlerts(): number;
   getSecurityRiskSummary(): {
     lockedCount: number;
     todayAlertsCount: number;
@@ -91,13 +93,17 @@ export class Store implements IStore {
       CREATE TABLE IF NOT EXISTS notification_history (
         id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, source TEXT NOT NULL,
         credential_id INTEGER, upstream_id INTEGER, status TEXT NOT NULL,
-        title TEXT, content TEXT, media_type TEXT, message_id TEXT, error TEXT
+        title TEXT, content TEXT, media_type TEXT, message_id TEXT, error TEXT,
+        handled_at TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_history_created_at ON notification_history(created_at DESC);
       CREATE TABLE IF NOT EXISTS system_settings (
         key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
       );
     `);
+    try {
+      this.db.exec('ALTER TABLE notification_history ADD COLUMN handled_at TEXT');
+    } catch {}
   }
 
   private encrypt(value: string): string {
@@ -261,14 +267,23 @@ export class Store implements IStore {
     const total = countRow?.total ?? 0;
     const totalPages = Math.max(1, Math.ceil(total / safePageSize));
     const offset = (safePage - 1) * safePageSize;
-    const items = this.db.prepare(`SELECT h.id, h.created_at, h.source, c.name credential_name, u.name upstream_name, h.status, h.title, h.content, h.media_type, h.message_id, h.error
+    const items = this.db.prepare(`SELECT h.id, h.created_at, h.source, c.name credential_name, u.name upstream_name, h.status, h.title, h.content, h.media_type, h.message_id, h.error, h.handled_at
       FROM notification_history h LEFT JOIN credentials c ON c.id = h.credential_id LEFT JOIN upstreams u ON u.id = h.upstream_id
       WHERE h.source = 'system'
       ORDER BY h.id DESC LIMIT ? OFFSET ?`).all(safePageSize, offset).map((row: any) => ({
         id: row.id, createdAt: row.created_at, source: row.source, credentialName: row.credential_name, upstreamName: row.upstream_name,
-        status: row.status, title: row.title, content: row.content, mediaType: row.media_type, messageId: row.message_id, error: row.error
+        status: row.status, title: row.title, content: row.content, mediaType: row.media_type, messageId: row.message_id, error: row.error,
+        handledAt: row.handled_at
       }));
     return { items, total, page: safePage, pageSize: safePageSize, totalPages };
+  }
+  resolveSecurityAlert(id: number): boolean {
+    const result = this.db.prepare("UPDATE notification_history SET handled_at = ? WHERE id = ? AND source = 'system'").run(now(), id);
+    return result.changes > 0;
+  }
+  resolveAllSecurityAlerts(): number {
+    const result = this.db.prepare("UPDATE notification_history SET handled_at = ? WHERE source = 'system' AND handled_at IS NULL").run(now());
+    return Number(result.changes);
   }
   getSecurityRiskSummary(): {
     lockedCount: number;
@@ -282,7 +297,7 @@ export class Store implements IStore {
     const todayIso = todayStart.toISOString();
 
     const lockedRow = this.db.prepare('SELECT COUNT(1) as count FROM login_attempts WHERE locked_until IS NOT NULL AND locked_until > ?').get(currentTime) as { count: number };
-    const todayRow = this.db.prepare("SELECT COUNT(1) as count FROM notification_history WHERE source = 'system' AND created_at >= ?").get(todayIso) as { count: number };
+    const todayRow = this.db.prepare("SELECT COUNT(1) as count FROM notification_history WHERE source = 'system' AND handled_at IS NULL AND created_at >= ?").get(todayIso) as { count: number };
     const totalRow = this.db.prepare("SELECT COUNT(1) as count FROM notification_history WHERE source = 'system'").get() as { count: number };
 
     const recent = this.listSecurityAlerts(1, 5).items;

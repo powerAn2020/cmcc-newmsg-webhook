@@ -39,6 +39,7 @@ export interface HistoryEntry {
   mediaType: string | null;
   messageId: string | null;
   error: string | null;
+  handledAt?: string | null;
 }
 
 export interface NativeSendRequest {
