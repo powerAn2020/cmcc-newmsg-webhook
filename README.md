@@ -66,6 +66,18 @@
 
 ### 方式二：Docker 容器化部署
 
+#### 1. 使用 Docker Compose（推荐）
+
+```bash
+# 启动服务
+docker compose up -d
+
+# 查看运行状态与日志
+docker compose logs -f
+```
+
+#### 2. 直接使用 Docker 运行
+
 ```bash
 # 构建镜像
 docker build -t cmcc-newmsg-webhook .

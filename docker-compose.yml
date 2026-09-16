@@ -1,0 +1,15 @@
+services:
+  cmcc-webhook:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cmcc-webhook
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    environment:
+      - TZ=Asia/Shanghai
