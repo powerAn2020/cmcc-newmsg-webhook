@@ -3,10 +3,8 @@ import { z } from 'zod';
 import type { CmccAccount } from './types.js';
 
 const accountSchema = z.object({
-  apiKey: z.string().min(1),
-  to: z.string().min(1).optional(),
-  defaultTo: z.string().min(1).optional()
-}).transform((v): CmccAccount => ({ apiKey: v.apiKey, defaultTo: v.defaultTo ?? v.to }));
+  apiKey: z.string().min(1)
+}).transform((v): CmccAccount => ({ apiKey: v.apiKey }));
 
 const mapSchema = z.record(accountSchema);
 
@@ -15,7 +13,7 @@ function parseMap(name: string, fallback = '{}'): Record<string, CmccAccount> {
   try {
     return mapSchema.parse(JSON.parse(raw));
   } catch (error) {
-    throw new Error(`${name} must be a JSON object of {apiKey, defaultTo}`);
+    throw new Error(`${name} must be a JSON object of {apiKey}`);
   }
 }
 
@@ -50,8 +48,9 @@ export interface AppConfig {
   adminLoginBanDurationMin: number;
   adminLoginBanDurationMs: number;
   accessLogPath: string;
-  accessLogFormat: 'text' | 'json';
+  accessLogFormat: 'json';
   accessLogRetentionDays: number;
+  trustProxy: boolean | string;
   notifyOnLogin: boolean;
   notifyOnLoginFailed: boolean;
   notifyOnAuthFailed: boolean;
@@ -59,9 +58,10 @@ export interface AppConfig {
   notifyLoginFailThreshold: number;
   notifyAuthFailThreshold: number;
   notifyAuthFailWindowMin: number;
-  rateLimitPhoneMinIntervalSec: number;
-  rateLimitPhoneHourMax: number;
-  rateLimitPhoneDayMax: number;
+  rateLimitMsgMinMax: number;
+  rateLimitMsgMinIntervalSec: number;
+  rateLimitMsgHourMax: number;
+  rateLimitMsgDayMax: number;
   rateLimitIpMinMax: number;
   rateLimitDuplicateWindowSec: number;
   notifyOnRateLimit: boolean;
@@ -120,7 +120,14 @@ export function loadConfig(): AppConfig {
   }
   const adminLoginBanDurationMs = adminLoginBanDurationMin * 60_000;
 
-  const accessLogFormat = process.env.ACCESS_LOG_FORMAT === 'json' ? 'json' : 'text';
+  const trustProxyEnv = process.env.TRUST_PROXY?.trim();
+  const trustProxy: boolean | string = trustProxyEnv === 'true' || trustProxyEnv === '1'
+    ? true
+    : trustProxyEnv === 'false' || trustProxyEnv === '0' || !trustProxyEnv
+      ? false
+      : trustProxyEnv;
+
+  const accessLogFormat = 'json' as const;
   const accessLogRetentionDays = Math.max(1, Number(process.env.ACCESS_LOG_RETENTION_DAYS ?? 7) || 7);
   const notifyOnLogin = process.env.NOTIFY_ON_LOGIN === 'true';
   const notifyOnLoginFailed = process.env.NOTIFY_ON_LOGIN_FAILED === 'true';
@@ -130,11 +137,18 @@ export function loadConfig(): AppConfig {
   const notifyAuthFailThreshold = Math.max(1, Number(process.env.NOTIFY_AUTH_FAIL_THRESHOLD ?? 3) || 3);
   const notifyAuthFailWindowMin = Math.max(1, Number(process.env.NOTIFY_AUTH_FAIL_WINDOW_MIN ?? 1) || 1);
 
-  const rateLimitPhoneMinIntervalSec = Math.max(0, Number(process.env.RATE_LIMIT_PHONE_MIN_INTERVAL_SEC ?? 60) || 60);
-  const rateLimitPhoneHourMax = Math.max(0, Number(process.env.RATE_LIMIT_PHONE_HOUR_MAX ?? 10) || 10);
-  const rateLimitPhoneDayMax = Math.max(0, Number(process.env.RATE_LIMIT_PHONE_DAY_MAX ?? 20) || 20);
-  const rateLimitIpMinMax = Math.max(0, Number(process.env.RATE_LIMIT_IP_MIN_MAX ?? 30) || 30);
-  const rateLimitDuplicateWindowSec = Math.max(0, Number(process.env.RATE_LIMIT_DUPLICATE_WINDOW_SEC ?? 300) || 300);
+  const parseEnvInt = (val: string | undefined, defaultVal: number): number => {
+    if (val === undefined || val === '') return defaultVal;
+    const n = Number(val);
+    return Number.isInteger(n) && n >= 0 ? n : defaultVal;
+  };
+
+  const rateLimitMsgMinMax = parseEnvInt(process.env.RATE_LIMIT_MSG_MIN_MAX, 10);
+  const rateLimitMsgMinIntervalSec = parseEnvInt(process.env.RATE_LIMIT_MSG_MIN_INTERVAL_SEC ?? process.env.RATE_LIMIT_PHONE_MIN_INTERVAL_SEC, 0);
+  const rateLimitMsgHourMax = parseEnvInt(process.env.RATE_LIMIT_MSG_HOUR_MAX ?? process.env.RATE_LIMIT_PHONE_HOUR_MAX, 0);
+  const rateLimitMsgDayMax = parseEnvInt(process.env.RATE_LIMIT_MSG_DAY_MAX ?? process.env.RATE_LIMIT_PHONE_DAY_MAX, 0);
+  const rateLimitIpMinMax = parseEnvInt(process.env.RATE_LIMIT_IP_MIN_MAX, 30);
+  const rateLimitDuplicateWindowSec = parseEnvInt(process.env.RATE_LIMIT_DUPLICATE_WINDOW_SEC, 300);
   const notifyOnRateLimit = process.env.NOTIFY_ON_RATE_LIMIT !== 'false';
 
   const rawDbType = (process.env.DB_TYPE || process.env.DATABASE_TYPE || 'sqlite').toLowerCase();
@@ -183,6 +197,7 @@ export function loadConfig(): AppConfig {
     accessLogPath: process.env.ACCESS_LOG_PATH ?? './logs/access.log',
     accessLogFormat,
     accessLogRetentionDays,
+    trustProxy,
     notifyOnLogin,
     notifyOnLoginFailed,
     notifyOnAuthFailed,
@@ -190,9 +205,10 @@ export function loadConfig(): AppConfig {
     notifyLoginFailThreshold,
     notifyAuthFailThreshold,
     notifyAuthFailWindowMin,
-    rateLimitPhoneMinIntervalSec,
-    rateLimitPhoneHourMax,
-    rateLimitPhoneDayMax,
+    rateLimitMsgMinMax,
+    rateLimitMsgMinIntervalSec,
+    rateLimitMsgHourMax,
+    rateLimitMsgDayMax,
     rateLimitIpMinMax,
     rateLimitDuplicateWindowSec,
     notifyOnRateLimit

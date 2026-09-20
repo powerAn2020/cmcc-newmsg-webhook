@@ -163,12 +163,12 @@ export class AccessLogger {
   private currentDate: string = '';
   private cleanupTimer?: NodeJS.Timeout;
 
-  constructor(filePath: string, format: 'text' | 'json' = 'text', retentionDays = 7) {
+  constructor(filePath: string, format: 'text' | 'json' = 'json', retentionDays = 7) {
     this.baseFilePath = filePath;
     this.logDir = path.dirname(filePath);
     this.fileExt = path.extname(filePath) || '.log';
     this.fileBaseName = path.basename(filePath, this.fileExt);
-    this.format = format;
+    this.format = 'json';
     this.retentionDays = Math.max(1, retentionDays);
   }
 
@@ -206,12 +206,12 @@ export class AccessLogger {
     }
   }
 
-  public setFormat(format: 'text' | 'json') {
-    this.format = format;
+  public setFormat(_format: 'text' | 'json') {
+    this.format = 'json';
   }
 
-  public getFormat(): 'text' | 'json' {
-    return this.format;
+  public getFormat(): 'json' {
+    return 'json';
   }
 
   public setRetentionDays(days: number) {
@@ -231,7 +231,7 @@ export class AccessLogger {
       if (dateStr !== this.currentDate || !this.stream || !this.stream.writable) {
         this.rotateStream(dateStr);
       }
-      const line = this.format === 'json' ? formatAccessLogJson(entry) : formatAccessLog(entry);
+      const line = formatAccessLogJson(entry);
       if (this.stream && this.stream.writable) {
         this.stream.write(line + '\n');
       }

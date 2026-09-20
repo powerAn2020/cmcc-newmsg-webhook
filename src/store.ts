@@ -8,7 +8,7 @@ import mysql, { type Pool as MysqlPool, type PoolOptions as MysqlPoolConfig } fr
 import type { CredentialKind, CredentialSummary, HistoryEntry, UpstreamSummary } from './types.js';
 
 export interface SecurityAlertSettings {
-  accessLogFormat: 'text' | 'json';
+  accessLogFormat: 'json';
   accessLogRetentionDays: number;
   notifyOnLogin: boolean;
   notifyOnLoginFailed: boolean;
@@ -17,9 +17,10 @@ export interface SecurityAlertSettings {
   notifyLoginFailThreshold: number;
   notifyAuthFailThreshold: number;
   notifyAuthFailWindowMin: number;
-  rateLimitPhoneMinIntervalSec: number;
-  rateLimitPhoneHourMax: number;
-  rateLimitPhoneDayMax: number;
+  rateLimitMsgMinMax: number;
+  rateLimitMsgMinIntervalSec: number;
+  rateLimitMsgHourMax: number;
+  rateLimitMsgDayMax: number;
   rateLimitIpMinMax: number;
   rateLimitDuplicateWindowSec: number;
   notifyOnRateLimit: boolean;
@@ -1145,7 +1146,7 @@ async function buildSecuritySettings(getter: (key: string) => Promise<string>): 
     return Number.isFinite(n) ? n : def;
   };
   return {
-    accessLogFormat: (await getter('accessLogFormat')) === 'json' ? 'json' : 'text',
+    accessLogFormat: 'json',
     accessLogRetentionDays: Math.max(1, await parseNum('accessLogRetentionDays', 30)),
     notifyOnLogin: (await getter('notifyOnLogin')) === 'true',
     notifyOnLoginFailed: (await getter('notifyOnLoginFailed')) === 'true',
@@ -1154,9 +1155,10 @@ async function buildSecuritySettings(getter: (key: string) => Promise<string>): 
     notifyLoginFailThreshold: Math.max(1, await parseNum('notifyLoginFailThreshold', 3)),
     notifyAuthFailThreshold: Math.max(1, await parseNum('notifyAuthFailThreshold', 3)),
     notifyAuthFailWindowMin: Math.max(1, await parseNum('notifyAuthFailWindowMin', 1)),
-    rateLimitPhoneMinIntervalSec: Math.max(0, await parseNum('rateLimitPhoneMinIntervalSec', 60)),
-    rateLimitPhoneHourMax: Math.max(0, await parseNum('rateLimitPhoneHourMax', 10)),
-    rateLimitPhoneDayMax: Math.max(0, await parseNum('rateLimitPhoneDayMax', 20)),
+    rateLimitMsgMinMax: Math.max(1, await parseNum('rateLimitMsgMinMax', 10)),
+    rateLimitMsgMinIntervalSec: Math.max(0, await parseNum('rateLimitMsgMinIntervalSec', await parseNum('rateLimitPhoneMinIntervalSec', 0))),
+    rateLimitMsgHourMax: Math.max(0, await parseNum('rateLimitMsgHourMax', await parseNum('rateLimitPhoneHourMax', 0))),
+    rateLimitMsgDayMax: Math.max(0, await parseNum('rateLimitMsgDayMax', await parseNum('rateLimitPhoneDayMax', 0))),
     rateLimitIpMinMax: Math.max(0, await parseNum('rateLimitIpMinMax', 30)),
     rateLimitDuplicateWindowSec: Math.max(0, await parseNum('rateLimitDuplicateWindowSec', 300)),
     notifyOnRateLimit: (await getter('notifyOnRateLimit')) !== 'false'
@@ -1167,7 +1169,7 @@ async function applySecuritySettingsUpdate(
   settings: Partial<SecurityAlertSettings>,
   setter: (key: string, value: string) => Promise<void>
 ): Promise<void> {
-  if (settings.accessLogFormat !== undefined) await setter('accessLogFormat', settings.accessLogFormat);
+  if (settings.accessLogFormat !== undefined) await setter('accessLogFormat', 'json');
   if (settings.accessLogRetentionDays !== undefined) await setter('accessLogRetentionDays', String(settings.accessLogRetentionDays));
   if (settings.notifyOnLogin !== undefined) await setter('notifyOnLogin', String(settings.notifyOnLogin));
   if (settings.notifyOnLoginFailed !== undefined) await setter('notifyOnLoginFailed', String(settings.notifyOnLoginFailed));
@@ -1176,9 +1178,10 @@ async function applySecuritySettingsUpdate(
   if (settings.notifyLoginFailThreshold !== undefined) await setter('notifyLoginFailThreshold', String(settings.notifyLoginFailThreshold));
   if (settings.notifyAuthFailThreshold !== undefined) await setter('notifyAuthFailThreshold', String(settings.notifyAuthFailThreshold));
   if (settings.notifyAuthFailWindowMin !== undefined) await setter('notifyAuthFailWindowMin', String(settings.notifyAuthFailWindowMin));
-  if (settings.rateLimitPhoneMinIntervalSec !== undefined) await setter('rateLimitPhoneMinIntervalSec', String(settings.rateLimitPhoneMinIntervalSec));
-  if (settings.rateLimitPhoneHourMax !== undefined) await setter('rateLimitPhoneHourMax', String(settings.rateLimitPhoneHourMax));
-  if (settings.rateLimitPhoneDayMax !== undefined) await setter('rateLimitPhoneDayMax', String(settings.rateLimitPhoneDayMax));
+  if (settings.rateLimitMsgMinMax !== undefined) await setter('rateLimitMsgMinMax', String(settings.rateLimitMsgMinMax));
+  if (settings.rateLimitMsgMinIntervalSec !== undefined) await setter('rateLimitMsgMinIntervalSec', String(settings.rateLimitMsgMinIntervalSec));
+  if (settings.rateLimitMsgHourMax !== undefined) await setter('rateLimitMsgHourMax', String(settings.rateLimitMsgHourMax));
+  if (settings.rateLimitMsgDayMax !== undefined) await setter('rateLimitMsgDayMax', String(settings.rateLimitMsgDayMax));
   if (settings.rateLimitIpMinMax !== undefined) await setter('rateLimitIpMinMax', String(settings.rateLimitIpMinMax));
   if (settings.rateLimitDuplicateWindowSec !== undefined) await setter('rateLimitDuplicateWindowSec', String(settings.rateLimitDuplicateWindowSec));
   if (settings.notifyOnRateLimit !== undefined) await setter('notifyOnRateLimit', String(settings.notifyOnRateLimit));

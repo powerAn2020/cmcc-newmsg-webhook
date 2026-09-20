@@ -34,7 +34,7 @@ const config: AppConfig = {
   adminLoginBanDurationMin: 30,
   adminLoginBanDurationMs: 1800000,
   accessLogPath: './logs/test-access.log',
-  accessLogFormat: 'text',
+  accessLogFormat: 'json',
   accessLogRetentionDays: 30,
   notifyOnLogin: false,
   notifyOnLoginFailed: false,
@@ -43,9 +43,10 @@ const config: AppConfig = {
   notifyLoginFailThreshold: 3,
   notifyAuthFailThreshold: 3,
   notifyAuthFailWindowMin: 1,
-  rateLimitPhoneMinIntervalSec: 0,
-  rateLimitPhoneHourMax: 100,
-  rateLimitPhoneDayMax: 200,
+  rateLimitMsgMinMax: 10,
+  rateLimitMsgMinIntervalSec: 0,
+  rateLimitMsgHourMax: 100,
+  rateLimitMsgDayMax: 200,
   rateLimitIpMinMax: 100,
   rateLimitDuplicateWindowSec: 0,
   notifyOnRateLimit: false
@@ -462,8 +463,9 @@ describe('admin push API', () => {
 
       expect(fs.existsSync(testLog)).toBe(true);
       const logContent = fs.readFileSync(testLog, 'utf8');
-      expect(logContent).toContain('POST /message?token=tok_testsecret1234');
-      expect(logContent).toContain('AUTH: invalid_gotify_token(key=tok_***1234)');
+      expect(logContent).toContain('"url":"/message?token=tok_testsecret1234"');
+      expect(logContent).toContain('"authType":"invalid_gotify_token"');
+      expect(logContent).toContain('"maskedSecret":"tok_***1234"');
       if (fs.existsSync(testLog)) fs.unlinkSync(testLog);
       if (fs.existsSync(testLogBase)) fs.unlinkSync(testLogBase);
     });
@@ -477,7 +479,7 @@ describe('admin push API', () => {
       });
       expect(settingsRes.statusCode).toBe(200);
       const initialSettings = settingsRes.json();
-      expect(initialSettings).toHaveProperty('accessLogFormat', 'text');
+      expect(initialSettings).toHaveProperty('accessLogFormat', 'json');
       expect(initialSettings).toHaveProperty('notifyOnLogin', false);
       expect(initialSettings).toHaveProperty('notifyOnLoginFailed', false);
       expect(initialSettings).toHaveProperty('notifyOnAuthFailed', false);
@@ -689,9 +691,10 @@ describe('admin push API', () => {
       vi.clearAllMocks();
       config.adminUsername = 'admin';
       config.adminPassword = 'password';
-      config.rateLimitPhoneMinIntervalSec = 60;
-      config.rateLimitPhoneHourMax = 5;
-      config.rateLimitPhoneDayMax = 10;
+      config.rateLimitMsgMinMax = 10;
+      config.rateLimitMsgMinIntervalSec = 60;
+      config.rateLimitMsgHourMax = 5;
+      config.rateLimitMsgDayMax = 10;
       config.rateLimitIpMinMax = 30;
       config.rateLimitDuplicateWindowSec = 300;
       config.notifyOnRateLimit = true;
@@ -719,12 +722,12 @@ describe('admin push API', () => {
       await app.close();
     });
 
-    it('blocks rapid successive messages to the same phone (anti-bombing) with 429 and sends alert', async () => {
+    it('blocks rapid successive messages (anti-bombing) with 429 and sends alert', async () => {
       // First request: succeeds
       const res1 = await app.inject({
         method: 'POST',
         url: '/message?token=valid_rate_token',
-        payload: { message: 'Verification code: 111111', phone: '13800138000' }
+        payload: { message: 'Verification code: 111111' }
       });
       expect(res1.statusCode).toBe(200);
       expect(pool.send).toHaveBeenCalledTimes(1);
@@ -735,7 +738,7 @@ describe('admin push API', () => {
       const res2 = await app.inject({
         method: 'POST',
         url: '/message?token=valid_rate_token',
-        payload: { message: 'Verification code: 222222', phone: '13800138000' }
+        payload: { message: 'Verification code: 222222' }
       });
       expect(res2.statusCode).toBe(429);
       expect(res2.headers['retry-after']).toBeDefined();
@@ -752,15 +755,15 @@ describe('admin push API', () => {
       );
     });
 
-    it('blocks duplicate message content to the same phone within window with 429', async () => {
+    it('blocks duplicate message content within window with 429', async () => {
       // Disable minimum interval to isolate content deduplication
-      config.rateLimitPhoneMinIntervalSec = 0;
+      config.rateLimitMsgMinIntervalSec = 0;
       await app.inject({
         method: 'POST',
         url: '/admin/api/settings',
         headers: { cookie },
         payload: {
-          rateLimitPhoneMinIntervalSec: 0,
+          rateLimitMsgMinIntervalSec: 0,
           rateLimitDuplicateWindowSec: 300
         }
       });
@@ -769,18 +772,50 @@ describe('admin push API', () => {
       const res1 = await app.inject({
         method: 'POST',
         url: '/message?token=valid_rate_token',
-        payload: { message: 'Repeated content notice', phone: '13900139000' }
+        payload: { message: 'Repeated content notice' }
       });
       expect(res1.statusCode).toBe(200);
 
-      // Second request with identical content to same phone
+      // Second request with identical content
       const res2 = await app.inject({
         method: 'POST',
         url: '/message?token=valid_rate_token',
-        payload: { message: 'Repeated content notice', phone: '13900139000' }
+        payload: { message: 'Repeated content notice' }
       });
       expect(res2.statusCode).toBe(429);
       expect(res2.json().error).toContain('已被拦截抑制');
+    });
+
+    it('queues messages when exceeding per-minute limit instead of 429', async () => {
+      // Set min limit to 1 per minute, interval 0, duplicate window 0
+      await app.inject({
+        method: 'POST',
+        url: '/admin/api/settings',
+        headers: { cookie },
+        payload: {
+          rateLimitMsgMinMax: 1,
+          rateLimitMsgMinIntervalSec: 0,
+          rateLimitDuplicateWindowSec: 0
+        }
+      });
+
+      // First request under limit: sends immediately
+      const res1 = await app.inject({
+        method: 'POST',
+        url: '/message?token=valid_rate_token',
+        payload: { message: 'Message 1' }
+      });
+      expect(res1.statusCode).toBe(200);
+      expect(pool.send).toHaveBeenCalledTimes(1);
+
+      // Second request exceeds 1/min limit: should be queued, NOT 429!
+      const res2 = await app.inject({
+        method: 'POST',
+        url: '/message?token=valid_rate_token',
+        payload: { message: 'Message 2' }
+      });
+      expect(res2.statusCode).toBe(200);
+      expect(res2.json().id).toBeDefined();
     });
 
     it('manages risk summary, locked IP bans, unban, and dangerous logs API', async () => {

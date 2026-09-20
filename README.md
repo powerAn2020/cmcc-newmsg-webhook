@@ -9,11 +9,12 @@
 - **双接入协议**：
   - **Gotify 协议兼容**：原生兼容 `POST /message?token=<token>`，无缝替代 Gotify 作为监控警报推送源。
   - **标准 Webhook 接入**：支持 `POST /webhook`（Bearer Secret 鉴权），提供标准化 JSON 消息载荷。
-- **消息防轰炸与流量风控体系**：
-  - **手机号阶梯频控**：支持手机号最小发信间隔锁（默认 60s）、1 小时发信上限（默认 10 条）、24 小时自然日上限（默认 20 条）。
-  - **内容智能防重放抑制**：基于 `SHA-256(phone:content)` 计算消息指纹，在抑制窗口内（默认 300s）阻止相同内容重复刷屏。
+- **消息频控与平滑排队体系**：
+  - **速率限制与削峰排队**：限制每分钟最多发送 10 条消息，超出配额自动进入异步 FIFO 队列平滑下发，防止上游过载与丢信。
+  - **小时与自然日防护**：支持按需开启 1 小时发信上限（默认 0 不限制）与 24 小时自然日上限（默认 0 不限制）。
+  - **内容智能防重放抑制**：基于 `SHA-256(content)` 计算消息指纹，在抑制窗口内（默认 300s）阻止相同内容重复刷屏。
   - **客户端 IP 速率限制**：支持客户端 IP 分钟级并发限流（默认 30 次/分）。
-  - **规范化 429 响应**：触发拦截时严格遵循 HTTP 规范返回 `429 Too Many Requests`，并在响应头携带 `Retry-After: <秒数>`。
+  - **规范化 429 响应**：触发恶意刷屏或 IP 频控时严格遵循 HTTP 规范返回 `429 Too Many Requests`，并在响应头携带 `Retry-After: <秒数>`。
   - **安全预警联动**：触发风控或异常拦截时，自动向上游指定或所有可用通道推送安全告警消息。
 - **解耦与通用扩展架构**：
   - **通用缓存层抽象 (`ICacheService`)**：规范化缓存契约，默认内置零依赖的高精度毫秒级时间戳滑动窗口 `MemoryCacheService`，预留平滑无缝切换至 Redis 分布式缓存能力。
@@ -21,7 +22,7 @@
 - **完善的消息格式与富媒体支持**：
   - **纯文本**：Markdown 格式智能清洗与段落转换，长文本按 2000 字符结合段落语义自动切片。
   - **富媒体**：支持 `IMAGE`、`AUDIO`、`VIDEO`、`FILE`、`TEXT` 5 种媒体类型。
-  - **媒体说明文字保真**：带说明文字的富媒体自动拆分为“独立文本消息 + 媒体消息”，防止手机终端忽略文案。
+  - **媒体说明文字保真**：带说明文字的富媒体自动拆分为“独立文本消息 + 媒体消息”，防止终端接收时忽略文案。
   - **双通道媒体提交**：支持远程媒体 URL 解析，或在后台/接口直接上传最大 200MB 的本地媒体文件（自动流式上传至 CMCC 文件网关）。
 - **多上游通道与广播分发**：
   - 支持配置多个CMCC通道（API Key，如 `ak_...`）。
@@ -53,9 +54,9 @@ flowchart TD
 
     subgraph SecurityLayer ["安全与风控层 (Security & Rate Limit)"]
         Auth[接口鉴权 / 会话检查 / 暴力破解拦截]
-        RL["消息防轰炸限流 (MessageRateLimiter)
-        • 手机号最小间隔锁 (60s)
-        • 1h / 24h 阶梯滑动窗口
+        RL["消息风控与平滑排队 (MessageRateLimiter & Queue)
+        • 每分钟 10 条上限，超出排队削峰下发
+        • 1h / 24h 阶梯滑动窗口 (默认 0 不限制)
         • SHA-256 内容去重抑制 (300s)
         • 客户端 IP 频控 (30/min)"]
     end
@@ -78,7 +79,7 @@ flowchart TD
     subgraph UpstreamLayer ["外部系统 (External Services)"]
         UploadGW["CMCC媒体上传 API"]
         MsgGW["CMCC 5G 新消息 WebSocket 网关"]
-        Phone["终端手机 (5G 消息接收)"]
+        Phone["终端用户 (5G 消息接收)"]
     end
 
     G --> Auth
@@ -177,6 +178,7 @@ docker run -d \
 | `CONFIG_ENCRYPTION_KEY` | **是** | - | 用于 AES-256-GCM 加密存储凭据密钥的随机字符串（丢失无法解密） |
 | `PORT` | 否 | `3000` | HTTP 服务监听端口 |
 | `HOST` | 否 | `0.0.0.0` | HTTP 服务监听地址 |
+| `TRUST_PROXY` | 否 | `false` | 部署在 Nginx/Caddy 等反代之后时设为 `true`，以透传真实客户端 IP 供 Fail2ban 识别 |
 | `ADMIN_COOKIE_SECURE` | 否 | `false` | 启用 HTTPS 生产代理时设为 `true` |
 | `CMCC_DATABASE_PATH` | 否 | `./data/cmcc-webhook.sqlite` | SQLite 数据库文件存储路径 |
 | **CMCC 网关配置** | | | |
@@ -189,8 +191,7 @@ docker run -d \
 | `ADMIN_LOGIN_FAIL_LIMIT` | 否 | `5` | 登录触发封禁的最大连续失败尝试次数 |
 | `ADMIN_LOGIN_FAIL_WINDOW_MIN` | 否 | `15` | 登录失败统计观测窗口（分钟） |
 | `ADMIN_LOGIN_BAN_DURATION_MIN` | 否 | `30` | 登录封禁限制时长（分钟） |
-| `ACCESS_LOG_PATH` | 否 | `./logs/access.log` | 访问审计日志输出基准路径 |
-| `ACCESS_LOG_FORMAT` | 否 | `text` | 访问日志格式（`text` 纯文本，`json` 便于采集分析） |
+| `ACCESS_LOG_PATH` | 否 | `./logs/access.log` | 访问审计日志输出基准路径（自动按日轮转为单行 JSON 格式） |
 | `ACCESS_LOG_RETENTION_DAYS`| 否 | `30` | 访问日志保留天数（系统定时每日清理过期文件） |
 | **安全预警通知策略** | | | |
 | `NOTIFY_ON_LOGIN` | 否 | `false` | 管理员登录成功时是否推送通知 |
@@ -201,11 +202,12 @@ docker run -d \
 | `NOTIFY_AUTH_FAIL_THRESHOLD` | 否 | `3` | 未授权访问触发告警的拦截次数阈值 |
 | `NOTIFY_AUTH_FAIL_WINDOW_MIN`| 否 | `1` | 未授权访问告警统计时间窗口（分钟） |
 | **消息防轰炸与流量风控** | | | |
-| `RATE_LIMIT_PHONE_MIN_INTERVAL_SEC` | 否 | `60` | 单个手机号发信最小间隔（秒，设为 0 关闭此项校验） |
-| `RATE_LIMIT_PHONE_HOUR_MAX` | 否 | `10` | 单个手机号 1 小时滑动窗口发信上限 |
-| `RATE_LIMIT_PHONE_DAY_MAX` | 否 | `20` | 单个手机号 24 小时自然日滑动窗口发信上限 |
+| `RATE_LIMIT_MSG_MIN_MAX` | 否 | `10` | 每分钟发信上限（超出进入排队平滑下发） |
+| `RATE_LIMIT_MSG_MIN_INTERVAL_SEC` | 否 | `0` | 发信最小间隔（秒，设为 0 关闭此项校验） |
+| `RATE_LIMIT_MSG_HOUR_MAX` | 否 | `0` | 1 小时滑动窗口发信上限（0 为不限制） |
+| `RATE_LIMIT_MSG_DAY_MAX` | 否 | `0` | 24 小时自然日滑动窗口发信上限（0 为不限制） |
 | `RATE_LIMIT_IP_MIN_MAX` | 否 | `30` | 单个客户端 IP 每分钟请求上限 |
-| `RATE_LIMIT_DUPLICATE_WINDOW_SEC` | 否 | `300` | 相同目标+相同内容去重防重复重放抑制窗口（秒） |
+| `RATE_LIMIT_DUPLICATE_WINDOW_SEC` | 否 | `300` | 相同内容去重防重复重放抑制窗口（秒） |
 | `NOTIFY_ON_RATE_LIMIT` | 否 | `true` | 触发消息防轰炸或风控拦截时是否推送安全预警 |
 
 ---
@@ -233,7 +235,7 @@ curl -i http://localhost:3000/healthz -H 'Authorization: Bearer <webhook-secret>
 
 - **路径**：`POST /message?token=<gotify-token>` 或使用请求头 `X-Gotify-Key: <gotify-token>`
 
-#### 普通文本推送（支持指定手机号）
+#### 普通文本推送
 
 ```bash
 curl -X POST 'http://localhost:3000/message?token=<gotify-token>' \
@@ -241,8 +243,7 @@ curl -X POST 'http://localhost:3000/message?token=<gotify-token>' \
   -d '{
     "title": "服务器告警",
     "message": "CPU 使用率已超过 90%，请注意排查",
-    "priority": 5,
-    "phone": "13800138000"
+    "priority": 5
   }'
 ```
 
@@ -260,8 +261,7 @@ curl -X POST 'http://localhost:3000/message?token=<gotify-token>' \
       "cmcc-newmsg": {
         "mediaType": "IMAGE",
         "mediaUrl": "https://example.com/snapshot.jpg",
-        "thumbnailUrl": "https://example.com/snapshot_thumb.jpg",
-        "to": "13800138000"
+        "thumbnailUrl": "https://example.com/snapshot_thumb.jpg"
       }
     }
   }'
@@ -275,15 +275,13 @@ curl -X POST 'http://localhost:3000/message?token=<gotify-token>' \
 curl -X POST 'http://localhost:3000/message?token=<gotify-token>' \
   -F 'file=@./report.pdf' \
   -F 'title=运维报告' \
-  -F 'message=请查阅本周运维报告附件' \
-  -F 'phone=13800138000'
+  -F 'message=请查阅本周运维报告附件'
 ```
 
 - **表单字段说明**：
   - `file`：本地文件路径（必填）。
   - `title`：消息标题（可选）。
   - `message`：文本说明内容（可选；带文字说明时系统自动两阶段分发：先发文案再发文件）。
-  - `phone` / `to`：目标手机号（可选）。
   - `mediaType`：媒体类型（可选 `IMAGE`、`AUDIO`、`VIDEO`、`FILE`，默认根据文件扩展名/MIME 自动推断）。
 
 ### 3. 通用 Webhook 接口
@@ -299,7 +297,6 @@ curl -X POST http://localhost:3000/webhook \
   -H 'Content-Type: application/json' \
   -d '{
     "type": "send",
-    "to": "13800138000",
     "content": "【生产发布】新版本 v1.2.0 已成功部署发布上线。"
   }'
 ```
@@ -312,7 +309,6 @@ curl -X POST http://localhost:3000/webhook \
   -H 'Content-Type: application/json' \
   -d '{
     "type": "send",
-    "to": "13800138000",
     "content": "项目交付物归档压缩包",
     "mediaType": "FILE",
     "mediaUrl": "https://example.com/release-v1.0.zip",
@@ -327,36 +323,34 @@ curl -X POST http://localhost:3000/webhook \
   -H 'Authorization: Bearer <webhook-secret>' \
   -F 'file=@./snapshot.png' \
   -F 'content=服务监控快照截图' \
-  -F 'to=13800138000' \
   -F 'mediaType=IMAGE'
 ```
 
 ---
 
-## 429 错误码与风控拦截规范
+## 429 错误码与平滑排队机制
 
-当推送触发消息防轰炸或流量风控规则时，网关将返回标准 `HTTP 429 Too Many Requests`：
-
-- **响应头**：`Retry-After: <建议等待秒数>`
-- **响应体示例**：
-  ```json
-  {
-    "error": "同一手机号 (13800138000) 发送间隔不能少于 60 秒，请等待 58 秒后重试。",
-    "retryAfter": 58
-  }
-  ```
-  或者：
-  ```json
-  {
-    "error": "向目标 (13800138000) 发送的相同消息在 300 秒内已被拦截抑制，防止重复刷屏。",
-    "retryAfter": 300
-  }
-  ```
-- **典型拦截场景**：
-  - 发送间隔过短（< 60s）
-  - 单号超出 1 小时限额或 24 小时自然日限额
-  - 窗口内重复发送相同内容（防刷抑制）
-  - 客户端 IP 请求超速
+- **平滑排队分发**：当每分钟发送速率超过限制（默认 10 条/分钟）时，系统**不会**拒绝请求，而是将超额消息放入内存 FIFO 排队队列，按滑动窗口可用配额平滑逐条下发，接口立即返回 `{"messageId": "...", "status": "queued"}`。
+- **429 风控拦截场景**：当推送触发 IP 频控、恶意刷屏或配置的风控阈值时，网关将返回标准 `HTTP 429 Too Many Requests`：
+  - **响应头**：`Retry-After: <建议等待秒数>`
+  - **响应体示例**：
+    ```json
+    {
+      "error": "发送的相同消息在 300 秒内已被拦截抑制，防止重复刷屏。",
+      "retryAfter": 300
+    }
+    ```
+    或者：
+    ```json
+    {
+      "error": "客户端 IP (192.168.1.100) 请求过于频繁，请稍后重试。",
+      "retryAfter": 45
+    }
+    ```
+  - **典型拦截场景**：
+    - 窗口内重复发送相同内容（防刷抑制）
+    - 客户端 IP 请求超速（默认 30 次/分钟）
+    - 超出自定义配置的 1 小时或 24 小时自然日上限（若配置了大于 0 的阈值）
 
 ---
 
@@ -390,8 +384,8 @@ export interface IStore {
   hasAdminUser(): boolean;
   createAdminUser(username: string, passwordHash: string): void;
   // 上游通道管理
-  addUpstream(name: string, apiKey: string, defaultTo?: string): number;
-  listUpstreams(): { id: number; name: string; apiKeyMasked: string; defaultTo?: string; createdAt: string }[];
+  addUpstream(name: string, apiKey: string): number;
+  listUpstreams(): { id: number; name: string; apiKeyMasked: string; createdAt: string }[];
   // 凭据密钥管理
   addCredential(name: string, kind: 'gotify' | 'webhook', secretHash: string, encryptedSecret: string, upstreamIds: number[]): number;
   // 历史审计与安全设置
@@ -402,6 +396,54 @@ export interface IStore {
 }
 ```
 当前默认由 `SqliteStore` 提供支持。若需迁移至 PostgreSQL 或 MySQL，只需编写相应的类实现 `IStore`，并通过 `createStore(dbPath, encryptionKey, options)` 工厂返回对应实例，即可平滑完成底层数据库替换。
+
+---
+
+## Fail2ban 安全联动配置
+
+系统访问审计日志统一采用 **NDJSON（单行 JSON）** 格式按日轮转落盘（如 `logs/access-2026-09-20.log`）。配合 Linux 内核级防御工具 **Fail2ban**，可在网络层直接屏蔽恶意 IP，阻断暴力破解与刷频攻击。
+
+### 1. 部署规则文件
+
+项目已内置开箱即用的 Fail2ban 过滤器与策略模版（位于 `deploy/fail2ban/`）：
+
+```bash
+# 复制过滤器规则到系统目录
+sudo cp deploy/fail2ban/cmcc-newmsg.conf /etc/fail2ban/filter.d/
+
+# 复制策略模版到系统目录
+sudo cp deploy/fail2ban/jail.local /etc/fail2ban/jail.d/cmcc-newmsg.local
+```
+
+编辑 `/etc/fail2ban/jail.d/cmcc-newmsg.local`，将 `logpath` 调整为您服务器上实际部署的日志绝对路径：
+```ini
+logpath = /opt/cmicmaap/logs/access-*.log
+```
+
+### 2. 反向代理环境真实 IP 透传（若有）
+
+若本服务部署在 **Nginx / Caddy / Cloudflare** 等反向代理之后：
+1. 请在环境变量 `.env` 中设置 `TRUST_PROXY=true`。
+2. 确保反向代理配置中透传客户端真实 IP，例如 Nginx：
+   ```nginx
+   proxy_set_header Host $host;
+   proxy_set_header X-Real-IP $remote_addr;
+   proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+   proxy_set_header X-Forwarded-Proto $scheme;
+   ```
+
+### 3. 验证与重载
+
+```bash
+# 测试正则表达式与当前日志匹配情况
+fail2ban-regex /opt/cmicmaap/logs/access-$(date +%F).log /etc/fail2ban/filter.d/cmcc-newmsg.conf
+
+# 重载并启动防御策略
+sudo systemctl restart fail2ban
+
+# 查看当前封禁状态与生效名单
+sudo fail2ban-client status cmcc-newmsg
+```
 
 ---
 

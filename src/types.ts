@@ -4,7 +4,6 @@ export interface CmccAccount {
   id?: number;
   name?: string;
   apiKey: string;
-  defaultTo?: string;
 }
 
 export type CredentialKind = 'gotify' | 'webhook';
@@ -45,7 +44,6 @@ export interface HistoryEntry {
 export interface NativeSendRequest {
   type: 'send';
   apiKey?: string;
-  to?: string;
   content?: string;
   mediaType?: MediaType;
   mediaUrl?: string;

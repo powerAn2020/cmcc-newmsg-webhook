@@ -17,7 +17,7 @@ export async function loadAndPopulateSettings() {
     form.elements.uploadUrl.value = settings.uploadUrl;
     form.elements.sendTimeoutMs.value = settings.sendTimeoutMs;
     form.elements.uploadTimeoutMs.value = settings.uploadTimeoutMs;
-    form.elements.accessLogFormat.value = settings.accessLogFormat || 'text';
+    form.elements.accessLogFormat.value = 'json';
     form.elements.accessLogRetentionDays.value = settings.accessLogRetentionDays ?? 30;
 
     if (form.elements.notifyUpstreamId) form.elements.notifyUpstreamId.value = settings.notifyUpstreamId ?? 0;
@@ -28,9 +28,10 @@ export async function loadAndPopulateSettings() {
     if (form.elements.notifyAuthFailThreshold) form.elements.notifyAuthFailThreshold.value = settings.notifyAuthFailThreshold ?? 3;
     if (form.elements.notifyAuthFailWindowMin) form.elements.notifyAuthFailWindowMin.value = settings.notifyAuthFailWindowMin ?? 1;
 
-    if (form.elements.rateLimitPhoneMinIntervalSec) form.elements.rateLimitPhoneMinIntervalSec.value = settings.rateLimitPhoneMinIntervalSec ?? 60;
-    if (form.elements.rateLimitPhoneHourMax) form.elements.rateLimitPhoneHourMax.value = settings.rateLimitPhoneHourMax ?? 10;
-    if (form.elements.rateLimitPhoneDayMax) form.elements.rateLimitPhoneDayMax.value = settings.rateLimitPhoneDayMax ?? 20;
+    if (form.elements.rateLimitMsgMinMax) form.elements.rateLimitMsgMinMax.value = settings.rateLimitMsgMinMax ?? 10;
+    if (form.elements.rateLimitMsgMinIntervalSec) form.elements.rateLimitMsgMinIntervalSec.value = settings.rateLimitMsgMinIntervalSec ?? 0;
+    if (form.elements.rateLimitMsgHourMax) form.elements.rateLimitMsgHourMax.value = settings.rateLimitMsgHourMax ?? 0;
+    if (form.elements.rateLimitMsgDayMax) form.elements.rateLimitMsgDayMax.value = settings.rateLimitMsgDayMax ?? 0;
     if (form.elements.rateLimitIpMinMax) form.elements.rateLimitIpMinMax.value = settings.rateLimitIpMinMax ?? 30;
     if (form.elements.rateLimitDuplicateWindowSec) form.elements.rateLimitDuplicateWindowSec.value = settings.rateLimitDuplicateWindowSec ?? 300;
     if (form.elements.notifyOnRateLimit) form.elements.notifyOnRateLimit.checked = settings.notifyOnRateLimit !== false;
@@ -68,7 +69,7 @@ export function initSettingsView() {
     const uploadUrl = form.elements.uploadUrl.value.trim();
     const sendTimeoutMs = Number(form.elements.sendTimeoutMs.value);
     const uploadTimeoutMs = Number(form.elements.uploadTimeoutMs.value);
-    const accessLogFormat = form.elements.accessLogFormat?.value || 'text';
+    const accessLogFormat = 'json';
     const accessLogRetentionDays = Number(form.elements.accessLogRetentionDays?.value) || 30;
     const notifyUpstreamId = Number(form.elements.notifyUpstreamId?.value) || 0;
     const notifyOnLogin = Boolean(form.elements.notifyOnLogin?.checked);
@@ -77,9 +78,10 @@ export function initSettingsView() {
     const notifyLoginFailThreshold = Number(form.elements.notifyLoginFailThreshold?.value) || 3;
     const notifyAuthFailThreshold = Number(form.elements.notifyAuthFailThreshold?.value) || 3;
     const notifyAuthFailWindowMin = Number(form.elements.notifyAuthFailWindowMin?.value) || 1;
-    const rateLimitPhoneMinIntervalSec = Number(form.elements.rateLimitPhoneMinIntervalSec?.value ?? 60);
-    const rateLimitPhoneHourMax = Number(form.elements.rateLimitPhoneHourMax?.value ?? 10);
-    const rateLimitPhoneDayMax = Number(form.elements.rateLimitPhoneDayMax?.value ?? 20);
+    const rateLimitMsgMinMax = Number(form.elements.rateLimitMsgMinMax?.value ?? 10);
+    const rateLimitMsgMinIntervalSec = Number(form.elements.rateLimitMsgMinIntervalSec?.value ?? 0);
+    const rateLimitMsgHourMax = Number(form.elements.rateLimitMsgHourMax?.value ?? 0);
+    const rateLimitMsgDayMax = Number(form.elements.rateLimitMsgDayMax?.value ?? 0);
     const rateLimitIpMinMax = Number(form.elements.rateLimitIpMinMax?.value ?? 30);
     const rateLimitDuplicateWindowSec = Number(form.elements.rateLimitDuplicateWindowSec?.value ?? 300);
     const notifyOnRateLimit = Boolean(form.elements.notifyOnRateLimit?.checked);
@@ -136,8 +138,8 @@ export function initSettingsView() {
       showMessage('#settings-message', '鉴权观测窗口必须至少为 1 分钟。');
       return;
     }
-    if (rateLimitPhoneMinIntervalSec < 0 || rateLimitPhoneHourMax < 0 || rateLimitPhoneDayMax < 0 || rateLimitIpMinMax < 0 || rateLimitDuplicateWindowSec < 0) {
-      showMessage('#settings-message', '流量风控阈值不能为负数。');
+    if (rateLimitMsgMinMax < 1 || rateLimitMsgMinIntervalSec < 0 || rateLimitMsgHourMax < 0 || rateLimitMsgDayMax < 0 || rateLimitIpMinMax < 0 || rateLimitDuplicateWindowSec < 0) {
+      showMessage('#settings-message', '流量风控阈值不能为负数，且每分钟上限必须至少为 1。');
       return;
     }
 
@@ -164,9 +166,10 @@ export function initSettingsView() {
         notifyLoginFailThreshold,
         notifyAuthFailThreshold,
         notifyAuthFailWindowMin,
-        rateLimitPhoneMinIntervalSec,
-        rateLimitPhoneHourMax,
-        rateLimitPhoneDayMax,
+        rateLimitMsgMinMax,
+        rateLimitMsgMinIntervalSec,
+        rateLimitMsgHourMax,
+        rateLimitMsgDayMax,
         rateLimitIpMinMax,
         rateLimitDuplicateWindowSec,
         notifyOnRateLimit

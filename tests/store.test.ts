@@ -80,4 +80,24 @@ describe('SQLite store', () => {
     expect(await store.getSetting('test_key')).toBe('test_val');
     store.close();
   });
+
+  it('reads and updates rate limit msg settings', async () => {
+    const store = new Store(':memory:', 'test-encryption-key');
+    const settings = await store.getSecuritySettings();
+    expect(settings.rateLimitMsgMinMax).toBe(10);
+    expect(settings.rateLimitMsgHourMax).toBe(0);
+    expect(settings.rateLimitMsgDayMax).toBe(0);
+    expect(settings.rateLimitMsgMinIntervalSec).toBe(0);
+
+    await store.updateSecuritySettings({
+      rateLimitMsgMinMax: 20,
+      rateLimitMsgHourMax: 50,
+      rateLimitMsgDayMax: 100
+    });
+    const updated = await store.getSecuritySettings();
+    expect(updated.rateLimitMsgMinMax).toBe(20);
+    expect(updated.rateLimitMsgHourMax).toBe(50);
+    expect(updated.rateLimitMsgDayMax).toBe(100);
+    store.close();
+  });
 });

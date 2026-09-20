@@ -32,19 +32,25 @@ afterEach(() => {
 });
 
 describe('configuration', () => {
-  it('loads Gotify and Webhook maps and supports to alias', () => {
-    process.env.CMCC_TOKEN_MAP = JSON.stringify({ t: { apiKey: 'ak_token', to: '13800138000' } });
-    process.env.CMCC_WEBHOOK_SECRETS = JSON.stringify({ s: { apiKey: 'ak_webhook', defaultTo: '13900139000' } });
+  it('loads Gotify and Webhook maps and validates rate limit defaults', () => {
+    process.env.CMCC_TOKEN_MAP = JSON.stringify({ t: { apiKey: 'ak_token' } });
+    process.env.CMCC_WEBHOOK_SECRETS = JSON.stringify({ s: { apiKey: 'ak_webhook' } });
     const cfg = loadConfig();
-    expect(cfg.gotifyTokens.t.defaultTo).toBe('13800138000');
+    expect(cfg.gotifyTokens.t.apiKey).toBe('ak_token');
     expect(cfg.webhookSecrets.s.apiKey).toBe('ak_webhook');
+    expect(cfg.rateLimitMsgMinMax).toBe(10);
+    expect(cfg.rateLimitMsgHourMax).toBe(0);
+    expect(cfg.rateLimitMsgDayMax).toBe(0);
+    expect(cfg.rateLimitMsgMinIntervalSec).toBe(0);
+    expect(cfg.rateLimitDuplicateWindowSec).toBe(300);
+    expect(cfg.rateLimitIpMinMax).toBe(30);
   });
 
   it('masks secrets', () => expect(maskSecret('ak_123456789')).toBe('ak_***789'));
 
-  it('allows accounts without a recipient because CMCC routes by API key', () => {
+  it('allows accounts because CMCC routes by API key', () => {
     process.env.CMCC_TOKEN_MAP = JSON.stringify({ t: { apiKey: 'ak_token' } });
-    expect(loadConfig().gotifyTokens.t.defaultTo).toBeUndefined();
+    expect(loadConfig().gotifyTokens.t.apiKey).toBe('ak_token');
   });
 
   it('requires admin access and encryption configuration', () => {

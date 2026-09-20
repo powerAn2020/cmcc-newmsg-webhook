@@ -154,8 +154,8 @@ describe('logger unit tests', () => {
 
     expect(fs.existsSync(dailyPath)).toBe(true);
     const content = fs.readFileSync(dailyPath, 'utf8');
-    expect(content).toContain('POST /webhook');
-    expect(content).toContain('POST /message');
+    expect(content).toContain('"url":"/webhook"');
+    expect(content).toContain('"url":"/message"');
     expect(content).not.toContain('/app.js');
 
     // 测试日期列表

@@ -527,12 +527,10 @@
               <div
                 style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; margin-top: 10px;">
                 <label>
-                  日志落盘格式 <span class="required">*</span>
-                  <select name="accessLogFormat">
-                    <option value="text">纯文本格式 (标准排版)</option>
-                    <option value="json">单行 JSON (NDJSON)</option>
-                  </select>
-                  <span class="help-text">日志文件的落盘记录格式</span>
+                  日志落盘格式
+                  <input type="text" value="单行 JSON (NDJSON / Fail2ban)" readonly disabled style="background: rgba(0,0,0,0.05); cursor: not-allowed;" />
+                  <input type="hidden" name="accessLogFormat" value="json" />
+                  <span class="help-text">日志已锁定为单行 JSON 格式，适配 Fail2ban 自动化防御</span>
                 </label>
                 <label>
                   日志保留天数 (天) <span class="required">*</span>
@@ -588,23 +586,23 @@
 
             <fieldset
               style="border: 1px solid var(--line); border-radius: 6px; padding: 20px; background: rgba(0,0,0,0.01);">
-              <legend style="font-weight: bold; padding: 0 10px; color: #126d68;">消息防轰炸与流量风控设置</legend>
+              <legend style="font-weight: bold; padding: 0 10px; color: #126d68;">消息频控与平滑排队设置</legend>
               <div
                 style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; margin-top: 10px;">
                 <label>
-                  手机号发信最小间隔 (秒) <span class="required">*</span>
-                  <input name="rateLimitPhoneMinIntervalSec" type="number" min="0" step="1" required />
-                  <span class="help-text">同一手机号两次发信之间必须间隔的秒数（默认：60 秒，0为不限制）</span>
+                  每分钟消息上限 (条，超出自动排队) <span class="required">*</span>
+                  <input name="rateLimitMsgMinMax" type="number" min="1" step="1" required />
+                  <span class="help-text">每分钟允许发送的最大消息数，超过自动进入排队平滑下发（默认：10 条）</span>
                 </label>
                 <label>
-                  手机号 1 小时发信上限 (条) <span class="required">*</span>
-                  <input name="rateLimitPhoneHourMax" type="number" min="0" step="1" required />
-                  <span class="help-text">同一手机号在 1 小时内允许发送的最大数量（默认：10 条，0为不限制）</span>
+                  1 小时发信上限 (条) <span class="required">*</span>
+                  <input name="rateLimitMsgHourMax" type="number" min="0" step="1" required />
+                  <span class="help-text">1 小时内允许发送的最大数量（默认：0，0为不限制）</span>
                 </label>
                 <label>
-                  手机号 24 小时发信上限 (条) <span class="required">*</span>
-                  <input name="rateLimitPhoneDayMax" type="number" min="0" step="1" required />
-                  <span class="help-text">同一手机号在 24 小时内允许发送的最大数量（默认：20 条，0为不限制）</span>
+                  24 小时发信上限 (条) <span class="required">*</span>
+                  <input name="rateLimitMsgDayMax" type="number" min="0" step="1" required />
+                  <span class="help-text">24 小时自然日内允许发送的最大数量（默认：0，0为不限制）</span>
                 </label>
               </div>
               <div
@@ -612,7 +610,12 @@
                 <label>
                   相同内容去重窗口 (秒) <span class="required">*</span>
                   <input name="rateLimitDuplicateWindowSec" type="number" min="0" step="1" required />
-                  <span class="help-text">同一手机号在指定秒数内禁止发送完全相同的内容（默认：300 秒，0为关闭）</span>
+                  <span class="help-text">在指定秒数内禁止发送完全相同的内容（默认：300 秒，0为关闭）</span>
+                </label>
+                <label>
+                  发信最小间隔 (秒) <span class="required">*</span>
+                  <input name="rateLimitMsgMinIntervalSec" type="number" min="0" step="1" required />
+                  <span class="help-text">两次发信之间必须间隔的秒数（默认：0 秒，0为不限制）</span>
                 </label>
                 <label>
                   客户端 IP 每分钟上限 (条) <span class="required">*</span>

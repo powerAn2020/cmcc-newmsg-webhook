@@ -22,6 +22,7 @@ import type { CmccAccount, CredentialKind, GotifyRequest, MediaType, NativeSendR
 import { AccessLogger, maskSecretKey } from './logger.js';
 import { createCacheService, type ICacheService } from './cache.js';
 import { MessageRateLimiter } from './rate-limiter.js';
+import { DispatchQueue } from './queue.js';
 
 const sessionCookie = 'cmcc_admin_session';
 const publicRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../public');
@@ -32,25 +33,24 @@ function safeEqual(left: string, right: string): boolean {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-function payloadFor(body: NativeSendRequest, account?: CmccAccount): Omit<NativeSendRequest, 'apiKey'> {
+function payloadFor(body: NativeSendRequest): Omit<NativeSendRequest, 'apiKey'> {
   const { apiKey: _ignored, ...payload } = body;
-  return { ...payload, type: 'send', to: body.to ?? account?.defaultTo };
+  return { ...payload, type: 'send' };
 }
 
-function gotifyPayload(body: GotifyRequest & { to?: string; phone?: string }, account?: CmccAccount): NativeSendRequest {
+function gotifyPayload(body: GotifyRequest): NativeSendRequest {
   const title = typeof body.title === 'string' ? body.title : '';
   const media = (body.extras as Record<string, any> | undefined)?.['cmcc-newmsg'];
-  const targetTo = body.to || body.phone || media?.to || media?.phone || account?.defaultTo;
   if (media?.mediaUrl || media?.mediaType) {
     const rawContent = typeof media.content === 'string' ? media.content : body.message;
     const content = title ? `${title}${rawContent ? `\n${rawContent}` : ''}` : rawContent;
     return {
-      type: 'send', to: targetTo, content: content || undefined,
+      type: 'send', content: content || undefined,
       mediaType: media.mediaType, mediaUrl: media.mediaUrl, thumbnailUrl: media.thumbnailUrl,
       mediaFileName: media.mediaFileName, mediaSize: media.mediaSize, mediaMimeType: media.mediaMimeType
     };
   }
-  return { type: 'send', to: targetTo, content: title ? `${title}\n${body.message}` : body.message };
+  return { type: 'send', content: title ? `${title}\n${body.message}` : body.message };
 }
 
 function gotifyResponse(body: GotifyRequest, messageId: string) {
@@ -68,6 +68,7 @@ type AppServices = {
   cache?: ICacheService;
   rateLimiter?: MessageRateLimiter;
   store?: IStore;
+  queue?: DispatchQueue;
 };
 type ManualPushBody = {
   title?: string;
@@ -159,7 +160,8 @@ export async function createApp(config = loadConfig(), services: AppServices = {
   const app = Fastify({
     logger: { redact: ['req.headers.authorization', 'req.query.token'] },
     logController: new LogController({ disableRequestLogging: true }),
-    bodyLimit: 1024 * 1024
+    bodyLimit: 1024 * 1024,
+    trustProxy: config.trustProxy
   });
   app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
     const text = typeof body === 'string' ? body : body.toString('utf8');
@@ -194,7 +196,7 @@ export async function createApp(config = loadConfig(), services: AppServices = {
     loginFailWindowMs: config.adminLoginFailWindowMs,
     loginBanDurationMs: config.adminLoginBanDurationMs
   });
-  if (!(await store.getSetting('accessLogFormat'))) await store.setSetting('accessLogFormat', config.accessLogFormat);
+  if (!(await store.getSetting('accessLogFormat'))) await store.setSetting('accessLogFormat', 'json');
   if (!(await store.getSetting('accessLogRetentionDays'))) await store.setSetting('accessLogRetentionDays', String(config.accessLogRetentionDays));
   if (!(await store.getSetting('notifyOnLogin'))) await store.setSetting('notifyOnLogin', String(config.notifyOnLogin));
   if (!(await store.getSetting('notifyOnLoginFailed'))) await store.setSetting('notifyOnLoginFailed', String(config.notifyOnLoginFailed));
@@ -203,20 +205,25 @@ export async function createApp(config = loadConfig(), services: AppServices = {
   if (!(await store.getSetting('notifyLoginFailThreshold'))) await store.setSetting('notifyLoginFailThreshold', String(config.notifyLoginFailThreshold));
   if (!(await store.getSetting('notifyAuthFailThreshold'))) await store.setSetting('notifyAuthFailThreshold', String(config.notifyAuthFailThreshold));
   if (!(await store.getSetting('notifyAuthFailWindowMin'))) await store.setSetting('notifyAuthFailWindowMin', String(config.notifyAuthFailWindowMin));
-  if (!(await store.getSetting('rateLimitPhoneMinIntervalSec'))) await store.setSetting('rateLimitPhoneMinIntervalSec', String(config.rateLimitPhoneMinIntervalSec));
-  if (!(await store.getSetting('rateLimitPhoneHourMax'))) await store.setSetting('rateLimitPhoneHourMax', String(config.rateLimitPhoneHourMax));
-  if (!(await store.getSetting('rateLimitPhoneDayMax'))) await store.setSetting('rateLimitPhoneDayMax', String(config.rateLimitPhoneDayMax));
+  if (!(await store.getSetting('rateLimitMsgMinMax'))) await store.setSetting('rateLimitMsgMinMax', String(config.rateLimitMsgMinMax));
+  if (!(await store.getSetting('rateLimitMsgMinIntervalSec'))) await store.setSetting('rateLimitMsgMinIntervalSec', String(config.rateLimitMsgMinIntervalSec));
+  if (!(await store.getSetting('rateLimitMsgHourMax'))) await store.setSetting('rateLimitMsgHourMax', String(config.rateLimitMsgHourMax));
+  if (!(await store.getSetting('rateLimitMsgDayMax'))) await store.setSetting('rateLimitMsgDayMax', String(config.rateLimitMsgDayMax));
   if (!(await store.getSetting('rateLimitIpMinMax'))) await store.setSetting('rateLimitIpMinMax', String(config.rateLimitIpMinMax));
   if (!(await store.getSetting('rateLimitDuplicateWindowSec'))) await store.setSetting('rateLimitDuplicateWindowSec', String(config.rateLimitDuplicateWindowSec));
   if (!(await store.getSetting('notifyOnRateLimit'))) await store.setSetting('notifyOnRateLimit', String(config.notifyOnRateLimit));
   const cache = services.cache ?? createCacheService();
   const rateLimiter = services.rateLimiter ?? new MessageRateLimiter(cache);
+  let currentMsgMinMax = config.rateLimitMsgMinMax;
+  const queue = services.queue ?? new DispatchQueue(() => currentMsgMinMax);
   const pool = services.pool ?? new CmccClientPool(config.wsUrl, config.wsVersion, config.sendTimeoutMs);
   const uploader = services.uploader ?? new CmccUploader(config.uploadUrl, config.uploadTimeoutMs);
   const securitySettings = await store.getSecuritySettings();
-  const accessLogger = services.accessLogger ?? new AccessLogger(config.accessLogPath, securitySettings.accessLogFormat);
+  currentMsgMinMax = securitySettings.rateLimitMsgMinMax ?? currentMsgMinMax;
+  const accessLogger = services.accessLogger ?? new AccessLogger(config.accessLogPath, 'json');
   accessLogger.startCleanupTimer(securitySettings.accessLogRetentionDays);
   app.addHook('onClose', async () => {
+    queue.close();
     pool.close();
     await store.close();
     await accessLogger.close();
@@ -307,7 +314,7 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       error: audit?.error
     });
 
-    if (reply.statusCode === 401 && audit?.authType?.startsWith('invalid_')) {
+    if ((reply.statusCode === 401 || reply.statusCode === 404) && audit?.authType?.startsWith('invalid_')) {
       const settings = await store.getSecuritySettings();
       if (settings.notifyOnAuthFailed) {
         const windowMs = settings.notifyAuthFailWindowMin * 60_000;
@@ -538,11 +545,10 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       return reply.badRequest(mediaError);
     }
 
-    const targetPhone = payload.to || (body as any)?.phone || (body as any)?.to || (request.query as any)?.phone || (request.query as any)?.to;
     const msgContent = payload.content || body.message;
     const secSettings = await store.getSecuritySettings();
     const rlCheck = await rateLimiter.check(
-      { phone: targetPhone, ip: request.ip, content: msgContent, credentialId: credential.id },
+      { ip: request.ip, content: msgContent, credentialId: credential.id },
       secSettings
     );
     if (!rlCheck.allowed) {
@@ -553,25 +559,44 @@ export async function createApp(config = loadConfig(), services: AppServices = {
         sendSecurityAlert(
           'rate_limit',
           '【风控拦截】防消息轰炸/频率超限拦截',
-          `来源 IP: ${request.ip}\n目标手机号: ${targetPhone || '未指定'}\n凭据名称: ${credential.name}\n拦截说明: ${rlCheck.reason}`,
+          `来源 IP: ${request.ip}\n凭据名称: ${credential.name}\n拦截说明: ${rlCheck.reason}`,
           request.ip
         );
       }
       return reply.code(429).send({ error: rlCheck.reason, retryAfter: rlCheck.retryAfterSeconds });
     }
 
-    let results: Awaited<ReturnType<typeof dispatch>>;
-    try {
-      results = await handleDispatchWithMedia('gotify', { credentialId: credential.id, upstreams: credential.upstreams }, payload, body.title ?? null, file);
-    } catch (error) {
-      if (file) await unlink(file.path).catch(() => undefined);
-      return reply.badRequest(error instanceof Error ? error.message : 'failed to process media');
-    }
+    const messageId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+    payload.messageId = messageId;
+    await rateLimiter.recordSuccess(msgContent, credential.id, secSettings);
 
-    const success = results.filter(item => item.ok);
-    if (success.length !== results.length) return reply.code(502).send({ error: 'one or more CMCC deliveries failed', results });
-    await rateLimiter.recordSuccess(targetPhone, msgContent, secSettings);
-    return reply.send(gotifyResponse(body, success[0].messageId));
+    if (queue.canSendNow()) {
+      queue.recordSent();
+      let results: Awaited<ReturnType<typeof dispatch>>;
+      try {
+        results = await handleDispatchWithMedia('gotify', { credentialId: credential.id, upstreams: credential.upstreams }, payload, body.title ?? null, file);
+      } catch (error) {
+        if (file) await unlink(file.path).catch(() => undefined);
+        return reply.badRequest(error instanceof Error ? error.message : 'failed to process media');
+      }
+
+      const success = results.filter(item => item.ok);
+      if (success.length !== results.length) return reply.code(502).send({ error: 'one or more CMCC deliveries failed', results });
+      return reply.send(gotifyResponse(body, success[0].messageId));
+    } else {
+      queue.enqueue({
+        id: messageId,
+        execute: async () => {
+          try {
+            await handleDispatchWithMedia('gotify', { credentialId: credential.id, upstreams: credential.upstreams }, payload, body.title ?? null, file);
+          } catch (err) {
+            if (file) await unlink(file.path).catch(() => undefined);
+            console.error(`Failed to dispatch queued gotify message ${messageId}:`, err);
+          }
+        }
+      });
+      return reply.send(gotifyResponse(body, messageId));
+    }
   });
 
   app.post<{ Body: NativeSendRequest }>('/webhook', async (request, reply) => {
@@ -651,12 +676,10 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       return reply.badRequest(mediaError);
     }
 
-    const rawBody = request.body as any;
-    const targetPhone = payload.to || rawBody?.to || rawBody?.phone || (request.query as any)?.phone || (request.query as any)?.to;
     const msgContent = payload.content;
     const secSettings = await store.getSecuritySettings();
     const rlCheck = await rateLimiter.check(
-      { phone: targetPhone, ip: request.ip, content: msgContent, credentialId: credential.id },
+      { ip: request.ip, content: msgContent, credentialId: credential.id },
       secSettings
     );
     if (!rlCheck.allowed) {
@@ -667,24 +690,43 @@ export async function createApp(config = loadConfig(), services: AppServices = {
         sendSecurityAlert(
           'rate_limit',
           '【风控拦截】防消息轰炸/频率超限拦截',
-          `来源 IP: ${request.ip}\n目标手机号: ${targetPhone || '未指定'}\n凭据名称: ${credential.name}\n拦截说明: ${rlCheck.reason}`,
+          `来源 IP: ${request.ip}\n凭据名称: ${credential.name}\n拦截说明: ${rlCheck.reason}`,
           request.ip
         );
       }
       return reply.code(429).send({ error: rlCheck.reason, retryAfter: rlCheck.retryAfterSeconds });
     }
 
-    let results: Awaited<ReturnType<typeof dispatch>>;
-    try {
-      results = await handleDispatchWithMedia('webhook', { credentialId: credential.id, upstreams: credential.upstreams }, payload, null, file);
-    } catch (error) {
-      if (file) await unlink(file.path).catch(() => undefined);
-      return reply.badRequest(error instanceof Error ? error.message : 'failed to process media');
-    }
+    const messageId = payload.messageId ?? `msg_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+    payload.messageId = messageId;
+    await rateLimiter.recordSuccess(msgContent, credential.id, secSettings);
 
-    if (results.some(item => !item.ok)) return reply.code(502).send({ ok: false, results });
-    await rateLimiter.recordSuccess(targetPhone, msgContent, secSettings);
-    return reply.send({ ok: true, messageIds: results.flatMap(item => item.messageIds), results });
+    if (queue.canSendNow()) {
+      queue.recordSent();
+      let results: Awaited<ReturnType<typeof dispatch>>;
+      try {
+        results = await handleDispatchWithMedia('webhook', { credentialId: credential.id, upstreams: credential.upstreams }, payload, null, file);
+      } catch (error) {
+        if (file) await unlink(file.path).catch(() => undefined);
+        return reply.badRequest(error instanceof Error ? error.message : 'failed to process media');
+      }
+
+      if (results.some(item => !item.ok)) return reply.code(502).send({ ok: false, results });
+      return reply.send({ ok: true, messageIds: results.flatMap(item => item.messageIds), results });
+    } else {
+      queue.enqueue({
+        id: messageId,
+        execute: async () => {
+          try {
+            await handleDispatchWithMedia('webhook', { credentialId: credential.id, upstreams: credential.upstreams }, payload, null, file);
+          } catch (err) {
+            if (file) await unlink(file.path).catch(() => undefined);
+            console.error(`Failed to dispatch queued webhook message ${messageId}:`, err);
+          }
+        }
+      });
+      return reply.send({ ok: true, messageId, messageIds: [messageId], status: 'queued' });
+    }
   });
 
   app.post<{ Body: { username?: string; password?: string } }>('/admin/api/login', async (request, reply) => {
@@ -768,9 +810,10 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       notifyLoginFailThreshold: sec.notifyLoginFailThreshold,
       notifyAuthFailThreshold: sec.notifyAuthFailThreshold,
       notifyAuthFailWindowMin: sec.notifyAuthFailWindowMin,
-      rateLimitPhoneMinIntervalSec: sec.rateLimitPhoneMinIntervalSec,
-      rateLimitPhoneHourMax: sec.rateLimitPhoneHourMax,
-      rateLimitPhoneDayMax: sec.rateLimitPhoneDayMax,
+      rateLimitMsgMinMax: sec.rateLimitMsgMinMax,
+      rateLimitMsgMinIntervalSec: sec.rateLimitMsgMinIntervalSec,
+      rateLimitMsgHourMax: sec.rateLimitMsgHourMax,
+      rateLimitMsgDayMax: sec.rateLimitMsgDayMax,
       rateLimitIpMinMax: sec.rateLimitIpMinMax,
       rateLimitDuplicateWindowSec: sec.rateLimitDuplicateWindowSec,
       notifyOnRateLimit: sec.notifyOnRateLimit
@@ -791,7 +834,7 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       sendTimeoutMs?: number;
       uploadUrl?: string;
       uploadTimeoutMs?: number;
-      accessLogFormat?: 'text' | 'json';
+      accessLogFormat?: 'json';
       accessLogRetentionDays?: number;
       notifyOnLogin?: boolean;
       notifyOnLoginFailed?: boolean;
@@ -800,9 +843,10 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       notifyLoginFailThreshold?: number;
       notifyAuthFailThreshold?: number;
       notifyAuthFailWindowMin?: number;
-      rateLimitPhoneMinIntervalSec?: number;
-      rateLimitPhoneHourMax?: number;
-      rateLimitPhoneDayMax?: number;
+      rateLimitMsgMinMax?: number;
+      rateLimitMsgMinIntervalSec?: number;
+      rateLimitMsgHourMax?: number;
+      rateLimitMsgDayMax?: number;
       rateLimitIpMinMax?: number;
       rateLimitDuplicateWindowSec?: number;
       notifyOnRateLimit?: boolean;
@@ -869,8 +913,8 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       }
     }
     if (body.accessLogFormat !== undefined) {
-      if (body.accessLogFormat !== 'text' && body.accessLogFormat !== 'json') {
-        return reply.badRequest('accessLogFormat must be text or json');
+      if (body.accessLogFormat !== 'json') {
+        return reply.badRequest('accessLogFormat must be json');
       }
     }
     if (body.accessLogRetentionDays !== undefined) {
@@ -910,19 +954,24 @@ export async function createApp(config = loadConfig(), services: AppServices = {
         return reply.badRequest('notifyAuthFailWindowMin must be a positive integer');
       }
     }
-    if (body.rateLimitPhoneMinIntervalSec !== undefined) {
-      if (!Number.isInteger(body.rateLimitPhoneMinIntervalSec) || body.rateLimitPhoneMinIntervalSec < 0) {
-        return reply.badRequest('rateLimitPhoneMinIntervalSec must be an integer >= 0');
+    if (body.rateLimitMsgMinMax !== undefined) {
+      if (!Number.isInteger(body.rateLimitMsgMinMax) || body.rateLimitMsgMinMax < 1) {
+        return reply.badRequest('rateLimitMsgMinMax must be an integer >= 1');
       }
     }
-    if (body.rateLimitPhoneHourMax !== undefined) {
-      if (!Number.isInteger(body.rateLimitPhoneHourMax) || body.rateLimitPhoneHourMax < 0) {
-        return reply.badRequest('rateLimitPhoneHourMax must be an integer >= 0');
+    if (body.rateLimitMsgMinIntervalSec !== undefined) {
+      if (!Number.isInteger(body.rateLimitMsgMinIntervalSec) || body.rateLimitMsgMinIntervalSec < 0) {
+        return reply.badRequest('rateLimitMsgMinIntervalSec must be an integer >= 0');
       }
     }
-    if (body.rateLimitPhoneDayMax !== undefined) {
-      if (!Number.isInteger(body.rateLimitPhoneDayMax) || body.rateLimitPhoneDayMax < 0) {
-        return reply.badRequest('rateLimitPhoneDayMax must be an integer >= 0');
+    if (body.rateLimitMsgHourMax !== undefined) {
+      if (!Number.isInteger(body.rateLimitMsgHourMax) || body.rateLimitMsgHourMax < 0) {
+        return reply.badRequest('rateLimitMsgHourMax must be an integer >= 0');
+      }
+    }
+    if (body.rateLimitMsgDayMax !== undefined) {
+      if (!Number.isInteger(body.rateLimitMsgDayMax) || body.rateLimitMsgDayMax < 0) {
+        return reply.badRequest('rateLimitMsgDayMax must be an integer >= 0');
       }
     }
     if (body.rateLimitIpMinMax !== undefined) {
@@ -992,7 +1041,7 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       envUpdates.CMCC_UPLOAD_TIMEOUT_MS = body.uploadTimeoutMs;
     }
     if (body.accessLogFormat !== undefined) {
-      envUpdates.ACCESS_LOG_FORMAT = body.accessLogFormat;
+      envUpdates.ACCESS_LOG_FORMAT = 'json';
     }
     if (body.accessLogRetentionDays !== undefined) {
       envUpdates.ACCESS_LOG_RETENTION_DAYS = body.accessLogRetentionDays;
@@ -1018,14 +1067,18 @@ export async function createApp(config = loadConfig(), services: AppServices = {
     if (body.notifyAuthFailWindowMin !== undefined) {
       envUpdates.NOTIFY_AUTH_FAIL_WINDOW_MIN = body.notifyAuthFailWindowMin;
     }
-    if (body.rateLimitPhoneMinIntervalSec !== undefined) {
-      envUpdates.RATE_LIMIT_PHONE_MIN_INTERVAL_SEC = body.rateLimitPhoneMinIntervalSec;
+    if (body.rateLimitMsgMinMax !== undefined) {
+      envUpdates.RATE_LIMIT_MSG_MIN_MAX = body.rateLimitMsgMinMax;
+      currentMsgMinMax = body.rateLimitMsgMinMax;
     }
-    if (body.rateLimitPhoneHourMax !== undefined) {
-      envUpdates.RATE_LIMIT_PHONE_HOUR_MAX = body.rateLimitPhoneHourMax;
+    if (body.rateLimitMsgMinIntervalSec !== undefined) {
+      envUpdates.RATE_LIMIT_MSG_MIN_INTERVAL_SEC = body.rateLimitMsgMinIntervalSec;
     }
-    if (body.rateLimitPhoneDayMax !== undefined) {
-      envUpdates.RATE_LIMIT_PHONE_DAY_MAX = body.rateLimitPhoneDayMax;
+    if (body.rateLimitMsgHourMax !== undefined) {
+      envUpdates.RATE_LIMIT_MSG_HOUR_MAX = body.rateLimitMsgHourMax;
+    }
+    if (body.rateLimitMsgDayMax !== undefined) {
+      envUpdates.RATE_LIMIT_MSG_DAY_MAX = body.rateLimitMsgDayMax;
     }
     if (body.rateLimitIpMinMax !== undefined) {
       envUpdates.RATE_LIMIT_IP_MIN_MAX = body.rateLimitIpMinMax;
@@ -1044,7 +1097,7 @@ export async function createApp(config = loadConfig(), services: AppServices = {
     });
 
     await store.updateSecuritySettings({
-      accessLogFormat: body.accessLogFormat,
+      accessLogFormat: 'json',
       accessLogRetentionDays: body.accessLogRetentionDays,
       notifyOnLogin: body.notifyOnLogin,
       notifyOnLoginFailed: body.notifyOnLoginFailed,
@@ -1053,16 +1106,15 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       notifyLoginFailThreshold: body.notifyLoginFailThreshold,
       notifyAuthFailThreshold: body.notifyAuthFailThreshold,
       notifyAuthFailWindowMin: body.notifyAuthFailWindowMin,
-      rateLimitPhoneMinIntervalSec: body.rateLimitPhoneMinIntervalSec,
-      rateLimitPhoneHourMax: body.rateLimitPhoneHourMax,
-      rateLimitPhoneDayMax: body.rateLimitPhoneDayMax,
+      rateLimitMsgMinMax: body.rateLimitMsgMinMax,
+      rateLimitMsgMinIntervalSec: body.rateLimitMsgMinIntervalSec,
+      rateLimitMsgHourMax: body.rateLimitMsgHourMax,
+      rateLimitMsgDayMax: body.rateLimitMsgDayMax,
       rateLimitIpMinMax: body.rateLimitIpMinMax,
       rateLimitDuplicateWindowSec: body.rateLimitDuplicateWindowSec,
       notifyOnRateLimit: body.notifyOnRateLimit
     });
-    if (body.accessLogFormat !== undefined) {
-      accessLogger.setFormat(body.accessLogFormat);
-    }
+    accessLogger.setFormat('json');
     if (body.accessLogRetentionDays !== undefined) {
       accessLogger.startCleanupTimer(body.accessLogRetentionDays);
     }

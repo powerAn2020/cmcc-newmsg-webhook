@@ -1,0 +1,23 @@
+# Fail2ban Jail configuration for cmcc-newmsg-webhook
+# 复制该文件到 /etc/fail2ban/jail.d/cmcc-newmsg.local 或合并至 jail.local
+
+[cmcc-newmsg]
+enabled  = true
+port     = 3000,http,https
+protocol = tcp
+filter   = cmcc-newmsg
+
+# 监控系统按日轮转的 JSON 访问日志文件（请将路径替换为实际部署目录）
+logpath  = /path/to/cmicmaap/logs/access-*.log
+
+# 查找时间窗口（秒）：10 分钟内累计
+findtime = 600
+
+# 触发封禁的最大尝试失败次数
+maxretry = 5
+
+# 封禁时长（秒）：默认封禁 1 小时（3600 秒），-1 为永久封禁
+bantime  = 3600
+
+# 豁免 IP 白名单（本机回环与内网网段，防止管理员误操作被封）
+ignoreip = 127.0.0.1/8 ::1 192.168.0.0/16 10.0.0.0/8
