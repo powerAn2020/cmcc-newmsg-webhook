@@ -8,63 +8,62 @@ services:
     # 以 root 启动，entrypoint 完成 chown 后会 su-exec 降权到 node
     user: root
     ports:
-      - "3000:3000"
+      - "${PORT:-3000}:3000"
     volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
+      - ${DATA_PATH:-./data}:/app/data
+      - ${LOGS_PATH:-./logs}:/app/logs
     environment:
-      TZ: Asia/Shanghai
-      NODE_ENV: production
+      TZ: ${TZ:-Asia/Shanghai}
+      NODE_ENV: ${NODE_ENV:-production}
 
       # --- 服务监听 ---
-      HOST: "0.0.0.0"
-      PORT: "3000"
+      HOST: ${HOST:-0.0.0.0}
 
       # --- 管理员账户（生产环境必须覆盖） ---
-      ADMIN_USERNAME: admin
-      ADMIN_PASSWORD: replace-with-a-long-unique-password
-      CONFIG_ENCRYPTION_KEY: replace-with-a-long-random-encryption-key
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-replace-with-a-long-unique-password}
+      CONFIG_ENCRYPTION_KEY: ${CONFIG_ENCRYPTION_KEY:-replace-with-a-long-random-encryption-key}
 
       # --- 安全 ---
-      TRUST_PROXY: "false"
-      ADMIN_COOKIE_SECURE: "false"
-      ADMIN_LOGIN_FAIL_LIMIT: "5"
-      ADMIN_LOGIN_FAIL_WINDOW_MIN: "15"
-      ADMIN_LOGIN_BAN_DURATION_MIN: "30"
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+      ADMIN_COOKIE_SECURE: ${ADMIN_COOKIE_SECURE:-false}
+      ADMIN_LOGIN_FAIL_LIMIT: ${ADMIN_LOGIN_FAIL_LIMIT:-5}
+      ADMIN_LOGIN_FAIL_WINDOW_MIN: ${ADMIN_LOGIN_FAIL_WINDOW_MIN:-15}
+      ADMIN_LOGIN_BAN_DURATION_MIN: ${ADMIN_LOGIN_BAN_DURATION_MIN:-30}
 
       # --- 数据库 ---
-      DB_TYPE: sqlite
-      DATABASE_URL: ""
-      CMCC_DATABASE_PATH: /app/data/cmcc-webhook.sqlite
+      DB_TYPE: ${DB_TYPE:-sqlite}
+      DATABASE_URL: ${DATABASE_URL:-}
+      CMCC_DATABASE_PATH: ${CMCC_DATABASE_PATH:-/app/data/cmcc-webhook.sqlite}
 
       # --- CMCC 上行 WebSocket ---
-      CMCC_WS_URL: wss://5gvas01.cmicmaap.com/gtw-ai/openclaw/ws/msg
-      CMCC_WS_VERSION: "2.0"
-      CMCC_SEND_TIMEOUT_MS: "10000"
+      CMCC_WS_URL: ${CMCC_WS_URL:-wss://5gvas01.cmicmaap.com/gtw-ai/openclaw/ws/msg}
+      CMCC_WS_VERSION: ${CMCC_WS_VERSION:-2.0}
+      CMCC_SEND_TIMEOUT_MS: ${CMCC_SEND_TIMEOUT_MS:-10000}
 
       # --- CMCC 上传接口 ---
-      CMCC_UPLOAD_URL: https://5gvas01.cmicmaap.com/gtw-ai/openclaw/api
-      CMCC_UPLOAD_TIMEOUT_MS: "120000"
+      CMCC_UPLOAD_URL: ${CMCC_UPLOAD_URL:-https://5gvas01.cmicmaap.com/gtw-ai/openclaw/api}
+      CMCC_UPLOAD_TIMEOUT_MS: ${CMCC_UPLOAD_TIMEOUT_MS:-120000}
 
       # --- 访问日志 ---
-      ACCESS_LOG_PATH: /app/logs/access.log
-      ACCESS_LOG_FORMAT: json
-      ACCESS_LOG_RETENTION_DAYS: "30"
+      ACCESS_LOG_PATH: ${ACCESS_LOG_PATH:-/app/logs/access.log}
+      ACCESS_LOG_FORMAT: ${ACCESS_LOG_FORMAT:-json}
+      ACCESS_LOG_RETENTION_DAYS: ${ACCESS_LOG_RETENTION_DAYS:-30}
 
       # --- 速率限制 ---
-      RATE_LIMIT_MSG_MIN_MAX: ""
-      RATE_LIMIT_PHONE_MIN_INTERVAL_SEC: "60"
-      RATE_LIMIT_PHONE_HOUR_MAX: "10"
-      RATE_LIMIT_PHONE_DAY_MAX: "20"
-      RATE_LIMIT_IP_MIN_MAX: "30"
-      RATE_LIMIT_DUPLICATE_WINDOW_SEC: "300"
+      RATE_LIMIT_MSG_MIN_MAX: ${RATE_LIMIT_MSG_MIN_MAX:-}
+      RATE_LIMIT_PHONE_MIN_INTERVAL_SEC: ${RATE_LIMIT_PHONE_MIN_INTERVAL_SEC:-60}
+      RATE_LIMIT_PHONE_HOUR_MAX: ${RATE_LIMIT_PHONE_HOUR_MAX:-10}
+      RATE_LIMIT_PHONE_DAY_MAX: ${RATE_LIMIT_PHONE_DAY_MAX:-20}
+      RATE_LIMIT_IP_MIN_MAX: ${RATE_LIMIT_IP_MIN_MAX:-30}
+      RATE_LIMIT_DUPLICATE_WINDOW_SEC: ${RATE_LIMIT_DUPLICATE_WINDOW_SEC:-300}
 
       # --- 告警通知 ---
-      NOTIFY_ON_LOGIN: "true"
-      NOTIFY_ON_LOGIN_FAILED: "true"
-      NOTIFY_ON_AUTH_FAILED: "true"
-      NOTIFY_ON_RATE_LIMIT: "true"
-      NOTIFY_UPSTREAM_ID: "0"
-      NOTIFY_LOGIN_FAIL_THRESHOLD: "3"
-      NOTIFY_AUTH_FAIL_THRESHOLD: "3"
-      NOTIFY_AUTH_FAIL_WINDOW_MIN: "1"
+      NOTIFY_ON_LOGIN: ${NOTIFY_ON_LOGIN:-true}
+      NOTIFY_ON_LOGIN_FAILED: ${NOTIFY_ON_LOGIN_FAILED:-true}
+      NOTIFY_ON_AUTH_FAILED: ${NOTIFY_ON_AUTH_FAILED:-true}
+      NOTIFY_ON_RATE_LIMIT: ${NOTIFY_ON_RATE_LIMIT:-true}
+      NOTIFY_UPSTREAM_ID: ${NOTIFY_UPSTREAM_ID:-0}
+      NOTIFY_LOGIN_FAIL_THRESHOLD: ${NOTIFY_LOGIN_FAIL_THRESHOLD:-3}
+      NOTIFY_AUTH_FAIL_THRESHOLD: ${NOTIFY_AUTH_FAIL_THRESHOLD:-3}
+      NOTIFY_AUTH_FAIL_WINDOW_MIN: ${NOTIFY_AUTH_FAIL_WINDOW_MIN:-1}
