@@ -156,10 +156,23 @@ export class SqliteStore implements IStore {
       loginBanDurationMs?: number;
     }
   ) {
-    if (databasePath !== ':memory:') {
-      fs.mkdirSync(path.dirname(path.resolve(databasePath)), { recursive: true });
+    let finalPath = databasePath;
+    if (finalPath !== ':memory:') {
+      const resolved = path.resolve(finalPath);
+      if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) {
+        finalPath = path.join(resolved, 'cmcc-webhook.sqlite');
+      }
+      const dir = path.dirname(path.resolve(finalPath));
+      fs.mkdirSync(dir, { recursive: true });
     }
-    this.db = new DatabaseSync(databasePath);
+    try {
+      this.db = new DatabaseSync(finalPath);
+    } catch (err: any) {
+      if (err?.code === 'ERR_SQLITE_ERROR' && err?.errcode === 14) {
+        throw new Error(`Unable to open SQLite database at "${finalPath}". Please check folder write permissions: ${err.message}`);
+      }
+      throw err;
+    }
     this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec('PRAGMA foreign_keys = ON');
     this.key = crypto.createHash('sha256').update(encryptionKey).digest();
