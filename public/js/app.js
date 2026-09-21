@@ -266,10 +266,52 @@ $('#credential-list').addEventListener('click', event => {
 // 导航与初始化
 $$('.nav-item').forEach(button => button.addEventListener('click', () => activateView(button.dataset.view)));
 
+async function copyToClipboard(text) {
+  if (!text) return false;
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // 降级使用 execCommand
+    }
+  }
+  const textArea = document.createElement('textarea');
+  textArea.value = text;
+  textArea.style.position = 'fixed';
+  textArea.style.left = '-999999px';
+  textArea.style.top = '-999999px';
+  textArea.setAttribute('readonly', '');
+  document.body.appendChild(textArea);
+  textArea.focus();
+  textArea.select();
+  let successful = false;
+  try {
+    successful = document.execCommand('copy');
+  } catch {
+    successful = false;
+  }
+  document.body.removeChild(textArea);
+  return successful;
+}
+
 $('#copy-secret').addEventListener('click', async () => {
-  await navigator.clipboard.writeText($('#created-secret').textContent);
-  $('#copy-secret').textContent = '已复制';
-  setTimeout(() => { $('#copy-secret').textContent = '复制密钥'; }, 1500);
+  const secretNode = $('#created-secret');
+  const text = secretNode.textContent.trim();
+  if (!text) return;
+  const ok = await copyToClipboard(text);
+  if (ok) {
+    $('#copy-secret').textContent = '已复制';
+    setTimeout(() => { $('#copy-secret').textContent = '复制密钥'; }, 1500);
+  } else {
+    const range = document.createRange();
+    const selection = window.getSelection();
+    range.selectNodeContents(secretNode);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    $('#copy-secret').textContent = '请按 Ctrl+C 复制';
+    setTimeout(() => { $('#copy-secret').textContent = '复制密钥'; }, 2500);
+  }
 });
 $('#close-secret').addEventListener('click', () => $('#secret-dialog').close());
 $('#secret-dialog').addEventListener('close', () => {
