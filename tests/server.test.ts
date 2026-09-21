@@ -874,6 +874,39 @@ describe('admin push API', () => {
       });
       expect(bansAfter.json().items.some((item: any) => item.ip === badIp)).toBe(false);
 
+      // Manual ban IP test
+      const manualIp = '198.51.100.88';
+      const manualBanRes = await app.inject({
+        method: 'POST',
+        url: '/admin/api/risks/bans',
+        headers: { cookie },
+        payload: { ip: manualIp, durationMinutes: 60 }
+      });
+      expect(manualBanRes.statusCode).toBe(201);
+      expect(manualBanRes.json().ok).toBe(true);
+      expect(manualBanRes.json().ip).toBe(manualIp);
+
+      const bansAfterManual = await app.inject({
+        method: 'GET',
+        url: '/admin/api/risks/bans',
+        headers: { cookie }
+      });
+      expect(bansAfterManual.json().items.some((item: any) => item.ip === manualIp)).toBe(true);
+
+      const blockedRes = await app.inject({
+        method: 'POST',
+        url: '/message?token=some_token',
+        remoteAddress: manualIp,
+        payload: { message: 'hello' }
+      });
+      expect(blockedRes.statusCode).toBe(429);
+
+      await app.inject({
+        method: 'DELETE',
+        url: `/admin/api/risks/bans/${manualIp}`,
+        headers: { cookie }
+      });
+
       // 4. Alerts endpoint & resolution
       const alertsRes = await app.inject({
         method: 'GET',
@@ -991,6 +1024,66 @@ describe('admin push API', () => {
         payload: { message: 'hello' }
       });
       expect(afterUnbanRes.statusCode).toBe(401);
+    });
+
+    it('forces logout and destroys session when an online IP is banned, and resolves associated alert on ban', async () => {
+      const attackerIp = '198.51.100.77';
+
+      // 1. 在该 IP 上登录获取会话
+      const loginRes = await app.inject({
+        method: 'POST',
+        url: '/admin/api/login',
+        remoteAddress: attackerIp,
+        payload: { username: 'admin', password: 'password' }
+      });
+      expect(loginRes.statusCode).toBe(200);
+      const attackerCookie = String(loginRes.headers['set-cookie']).split(';')[0];
+      expect(attackerCookie).toBeDefined();
+
+      // 在线验证：正常访问 /admin/api/me
+      const meRes = await app.inject({
+        method: 'GET',
+        url: '/admin/api/me',
+        remoteAddress: attackerIp,
+        headers: { cookie: attackerCookie }
+      });
+      expect(meRes.statusCode).toBe(200);
+
+      // 2. 模拟系统产生了一条包含该 IP 的待排查安全告警
+      const alertsRes1 = await app.inject({
+        method: 'GET',
+        url: '/admin/api/risks/alerts',
+        headers: { cookie }
+      });
+      // 触发一条告警
+      await app.inject({
+        method: 'POST',
+        url: '/message?token=wrong_token',
+        remoteAddress: attackerIp,
+        payload: { message: 'test' }
+      });
+
+      // 3. 管理员在后台执行封禁该 IP
+      const banRes = await app.inject({
+        method: 'POST',
+        url: '/admin/api/risks/bans',
+        headers: { cookie },
+        payload: { ip: attackerIp }
+      });
+      expect(banRes.statusCode).toBe(201);
+
+      // 4. 验证该被封禁 IP 的在线状态被强行踢掉：刷新/访问 /admin/api/me 返回 429 blocked
+      const kickedRes = await app.inject({
+        method: 'GET',
+        url: '/admin/api/me',
+        remoteAddress: attackerIp,
+        headers: { cookie: attackerCookie }
+      });
+      expect(kickedRes.statusCode).toBe(429);
+      expect(kickedRes.json().blocked).toBe(true);
+
+      // 验证 Cookie 清除指令存在
+      expect(kickedRes.headers['set-cookie']).toBeDefined();
     });
   });
 });

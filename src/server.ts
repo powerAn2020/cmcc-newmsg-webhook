@@ -341,6 +341,22 @@ export async function createApp(config = loadConfig(), services: AppServices = {
   });
 
   const requireAdmin = async (request: FastifyRequest, reply: FastifyReply) => {
+    const allowed = await store.loginAllowed(request.ip);
+    if (!allowed.allowed) {
+      const sessionId = request.cookies[sessionCookie];
+      if (sessionId) {
+        await store.deleteSession(sessionId);
+      }
+      reply.clearCookie(sessionCookie, { path: '/' });
+      (request as any).audit = { authType: 'blocked_admin_session', error: 'IP is blocked' };
+      const retryHeader = allowed.retryAfter ? String(allowed.retryAfter) : '86400';
+      return reply.code(429).header('Retry-After', retryHeader).send({
+        error: allowed.retryAfter ? '客户端 IP 处于防爆破临时封禁期，会话已终止' : '客户端 IP 已被系统封禁，会话已强制下线',
+        blocked: true,
+        ...(allowed.retryAfter ? { retryAfter: allowed.retryAfter } : {})
+      });
+    }
+
     const sessionId = request.cookies[sessionCookie];
     if (!sessionId || !(await store.hasSession(sessionId))) {
       (request as any).audit = { authType: 'invalid_admin_session' };
@@ -470,9 +486,10 @@ export async function createApp(config = loadConfig(), services: AppServices = {
     const ip = request.ip;
     const allowed = await store.loginAllowed(ip);
     if (!allowed.allowed) {
-      return reply.code(429).header('Retry-After', String(allowed.retryAfter)).send({
-        error: 'IP is temporarily blocked due to too many failed attempts',
-        retryAfter: allowed.retryAfter
+      const retryHeader = allowed.retryAfter ? String(allowed.retryAfter) : '86400';
+      return reply.code(429).header('Retry-After', retryHeader).send({
+        error: allowed.retryAfter ? 'IP is temporarily blocked due to too many failed attempts' : 'IP has been permanently blocked by administrator',
+        ...(allowed.retryAfter ? { retryAfter: allowed.retryAfter } : {})
       });
     }
 
@@ -603,9 +620,10 @@ export async function createApp(config = loadConfig(), services: AppServices = {
     const ip = request.ip;
     const allowed = await store.loginAllowed(ip);
     if (!allowed.allowed) {
-      return reply.code(429).header('Retry-After', String(allowed.retryAfter)).send({
-        error: 'IP is temporarily blocked due to too many failed attempts',
-        retryAfter: allowed.retryAfter
+      const retryHeader = allowed.retryAfter ? String(allowed.retryAfter) : '86400';
+      return reply.code(429).header('Retry-After', retryHeader).send({
+        error: allowed.retryAfter ? 'IP is temporarily blocked due to too many failed attempts' : 'IP has been permanently blocked by administrator',
+        ...(allowed.retryAfter ? { retryAfter: allowed.retryAfter } : {})
       });
     }
 
@@ -732,7 +750,13 @@ export async function createApp(config = loadConfig(), services: AppServices = {
   app.post<{ Body: { username?: string; password?: string } }>('/admin/api/login', async (request, reply) => {
     const ip = request.ip;
     const allowed = await store.loginAllowed(ip);
-    if (!allowed.allowed) return reply.code(429).header('Retry-After', String(allowed.retryAfter)).send({ error: 'too many login failures', retryAfter: allowed.retryAfter });
+    if (!allowed.allowed) {
+      const retryHeader = allowed.retryAfter ? String(allowed.retryAfter) : '86400';
+      return reply.code(429).header('Retry-After', retryHeader).send({
+        error: allowed.retryAfter ? 'too many login failures' : 'IP blocked by administrator',
+        ...(allowed.retryAfter ? { retryAfter: allowed.retryAfter } : {})
+      });
+    }
     const body = request.body ?? {};
     if (!safeEqual(body.username ?? '', config.adminUsername) || !safeEqual(body.password ?? '', config.adminPassword)) {
       const failResult = await store.recordLoginFailure(ip);
@@ -1145,6 +1169,23 @@ export async function createApp(config = loadConfig(), services: AppServices = {
 
   app.get('/admin/api/risks/bans', { preHandler: requireAdmin }, async () => {
     return { items: await store.listLockedIps() };
+  });
+
+  app.post<{ Body: { ip?: string; alertId?: number | string } }>('/admin/api/risks/bans', { preHandler: requireAdmin }, async (request, reply) => {
+    const ip = request.body?.ip?.trim();
+    if (!ip) return reply.badRequest('IP is required');
+    const result = await store.banIp(ip);
+
+    // 联动将关联的安全告警标记为已排查
+    const alertId = Number(request.body?.alertId);
+    if (Number.isInteger(alertId) && alertId > 0) {
+      await store.resolveSecurityAlert(alertId);
+    }
+    if (store.resolveSecurityAlertsByIp) {
+      await store.resolveSecurityAlertsByIp(ip);
+    }
+
+    return reply.code(201).send({ ok: true, ...result });
   });
 
   app.delete<{ Params: { ip: string } }>('/admin/api/risks/bans/:ip', { preHandler: requireAdmin }, async (request, reply) => {

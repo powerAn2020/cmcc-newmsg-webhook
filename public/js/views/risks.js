@@ -1,5 +1,6 @@
 import { state, $, $$, escapeHtml } from '../state.js';
 import { api } from '../api.js';
+import { showConfirm, showPrompt, showAlert } from '../modal.js';
 
 let riskState = {
   alertsPage: 1,
@@ -7,8 +8,30 @@ let riskState = {
   logsDate: '',
   logsPage: 1,
   logsTotalPages: 1,
-  bannerDismissed: false
+  bannerDismissed: false,
+  bannedIps: new Set()
 };
+
+export function isValidIp(ip) {
+  if (!ip || typeof ip !== 'string') return false;
+  const v4Regex = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
+  if (v4Regex.test(ip)) return true;
+  if (ip.includes(':') && /^[0-9a-fA-F:]{3,39}$/.test(ip)) return true;
+  return false;
+}
+
+export function extractIpFromText(text) {
+  if (!text) return null;
+  const labeled = text.match(/(?:来源\s*IP|登录\s*IP|拦截\s*IP|客户端\s*IP|IP)\s*[:：]\s*([0-9a-fA-F:.]+)/i);
+  if (labeled && isValidIp(labeled[1].trim())) {
+    return labeled[1].trim();
+  }
+  const v4Match = text.match(/\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b/);
+  if (v4Match && isValidIp(v4Match[0])) {
+    return v4Match[0];
+  }
+  return null;
+}
 
 export async function updateRiskSummaryAndBanner() {
   initRiskViewListeners();
@@ -16,7 +39,10 @@ export async function updateRiskSummaryAndBanner() {
     const summary = await api('/admin/api/risks/summary');
     const badge = $('#risk-nav-badge');
     const banner = $('#global-risk-alert-banner');
-    const riskTotal = (summary.lockedCount || 0) + (summary.todayAlertsCount || 0);
+    // 菜单栏风险角标和全局横条只统计系统安全风险（自动防爆破封禁 IP + 今日待排查告警），排除管理员手动封禁
+    const autoLockedCount = summary.autoLockedCount !== undefined ? (summary.autoLockedCount || 0) : 0;
+    const todayAlertsCount = summary.todayAlertsCount || 0;
+    const riskTotal = autoLockedCount + todayAlertsCount;
 
     // 更新导航栏角标
     if (badge) {
@@ -34,8 +60,8 @@ export async function updateRiskSummaryAndBanner() {
         const descEl = $('#risk-alert-desc');
         if (descEl) {
           const parts = [];
-          if (summary.lockedCount > 0) parts.push(`当前有 ${summary.lockedCount} 个 IP 处于封禁期`);
-          if (summary.todayAlertsCount > 0) parts.push(`今日累计触发 ${summary.todayAlertsCount} 起安全拦截告警`);
+          if (autoLockedCount > 0) parts.push(`当前有 ${autoLockedCount} 个 IP 触发防暴力破解封禁`);
+          if (todayAlertsCount > 0) parts.push(`今日累计触发 ${todayAlertsCount} 起安全拦截告警`);
           descEl.textContent = `检测到系统异常：${parts.join('，')}，请尽快排查！`;
         }
         banner.hidden = false;
@@ -67,6 +93,7 @@ export async function renderBans() {
   try {
     const data = await api('/admin/api/risks/bans');
     const items = data.items || [];
+    riskState.bannedIps = new Set(items.map(item => item.ip));
     if (!items.length) {
       list.innerHTML = '';
       if (empty) empty.hidden = false;
@@ -75,17 +102,23 @@ export async function renderBans() {
     if (empty) empty.hidden = true;
 
     list.innerHTML = items.map(item => {
-      const lockExpiry = item.lockedUntil ? new Date(item.lockedUntil).toLocaleString() : '永久';
-      const firstFail = item.firstFailedAt ? new Date(item.firstFailedAt).toLocaleString() : '-';
+      const isManual = item.failedCount === 0 || item.reason === '手动封禁' || !item.lockedUntil;
+      const reasonLabel = item.reason || (isManual ? '手动封禁' : `连续失败 ${item.failedCount} 次`);
+      const timeLabel = isManual ? '封禁时间' : '首次失败时间';
+      const timeValue = item.firstFailedAt ? new Date(item.firstFailedAt).toLocaleString() : '-';
+      const statusLabel = isManual ? '解封方式' : '预计解封时间';
+      const statusValue = isManual
+        ? '<strong style="color:var(--red);">永久封禁（需手动解封）</strong>'
+        : `<strong style="color:var(--ink);">${item.lockedUntil ? new Date(item.lockedUntil).toLocaleString() : '永久'}</strong>`;
       return `
         <div class="data-row" style="align-items: flex-start;">
           <div>
             <h5 style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
               <span class="badge failed">${escapeHtml(item.ip)}</span>
-              <span style="font-size:12px; font-weight:normal; color:var(--red);">连续失败 ${item.failedCount} 次</span>
+              <span style="font-size:12px; font-weight:normal; color:var(--red);">${escapeHtml(reasonLabel)}</span>
             </h5>
             <p style="color:var(--muted); font-size:12px;">
-              首次失败时间: ${firstFail} | 预计解封时间: <strong style="color:var(--ink);">${lockExpiry}</strong>
+              ${timeLabel}: ${timeValue} | ${statusLabel}: ${statusValue}
             </p>
           </div>
           <button class="button secondary compact unban-btn" data-ip="${escapeHtml(item.ip)}" type="button" style="color:var(--teal); font-weight:700;">
@@ -100,13 +133,22 @@ export async function renderBans() {
       btn.onclick = async () => {
         const ip = btn.dataset.ip;
         if (!ip) return;
+        const ok = await showConfirm({
+          eyebrow: '安全设置',
+          title: '解除 IP 拦截限制',
+          message: `确定要解除对 IP【${ip}】的全局拦截限制吗？\n\n解除后，该 IP 将恢复正常访问权限。`,
+          confirmText: '确认解封',
+          isDanger: false
+        });
+        if (!ok) return;
         btn.disabled = true;
         btn.textContent = '解封中...';
         try {
           await api(`/admin/api/risks/bans/${encodeURIComponent(ip)}`, { method: 'DELETE' });
-          await Promise.all([renderBans(), updateRiskSummaryAndBanner()]);
+          if (riskState.bannedIps) riskState.bannedIps.delete(ip);
+          await Promise.all([renderBans(), renderRiskAlerts(riskState.alertsPage), updateRiskSummaryAndBanner()]);
         } catch (err) {
-          alert('解封失败: ' + (err instanceof Error ? err.message : String(err)));
+          showAlert({ title: '解封失败', message: (err instanceof Error ? err.message : String(err)), isError: true });
           btn.disabled = false;
           btn.textContent = '立即解封';
         }
@@ -124,6 +166,13 @@ export async function renderRiskAlerts(page = 1) {
   if (!tbody) return;
 
   try {
+    if (!riskState.bannedIps || riskState.bannedIps.size === 0) {
+      try {
+        const bansData = await api('/admin/api/risks/bans');
+        riskState.bannedIps = new Set((bansData.items || []).map(item => item.ip));
+      } catch {}
+    }
+
     const data = await api(`/admin/api/risks/alerts?page=${page}&pageSize=10`);
     const items = data.items || [];
     riskState.alertsPage = data.page || 1;
@@ -153,9 +202,31 @@ export async function renderRiskAlerts(page = 1) {
       const handledBadge = isHandled
         ? '<span class="badge success">已排查</span>'
         : '<span class="badge warning">待排查</span>';
-      const actionCell = isHandled
-        ? `<span style="color:var(--muted); font-size:12px;">已完成</span>`
-        : `<button class="button secondary compact resolve-alert-btn" data-id="${item.id}" type="button" style="font-size:12px; color:var(--teal); font-weight:700;">标为已排查</button>`;
+
+      let operationsHtml = '';
+      if (!isHandled) {
+        const targetIp = extractIpFromText(item.content) || extractIpFromText(item.title);
+        let banBtnHtml = '';
+        if (targetIp) {
+          const isBanned = riskState.bannedIps && riskState.bannedIps.has(targetIp);
+          if (isBanned) {
+            banBtnHtml = `<button class="button secondary compact unban-alert-btn" data-ip="${escapeHtml(targetIp)}" type="button" style="font-size:11px; color:var(--teal); border-color:var(--teal); font-weight:700; white-space:nowrap;" title="该 IP 当前已被系统封禁，点击可解封">已封禁 (解封)</button>`;
+          } else {
+            banBtnHtml = `<button class="button danger compact ban-alert-btn" data-ip="${escapeHtml(targetIp)}" data-id="${item.id}" type="button" style="font-size:11px; font-weight:700; background:var(--red); color:#fff; border:none; white-space:nowrap;" title="将 IP【${escapeHtml(targetIp)}】加入黑名单，立即拦截访问并标记为已排查">封禁此 IP</button>`;
+          }
+        } else {
+          banBtnHtml = `<button class="button secondary compact manual-ban-alert-btn" data-id="${item.id}" type="button" style="font-size:11px; color:var(--muted); white-space:nowrap;" title="手动指定 IP 进行封禁">封禁 IP...</button>`;
+        }
+
+        operationsHtml = `
+          <div style="display:flex; flex-direction:column; gap:6px; align-items:center; justify-content:center;">
+            <button class="button secondary compact resolve-alert-btn" data-id="${item.id}" type="button" style="font-size:12px; color:var(--teal); font-weight:700;">标为已排查</button>
+            ${banBtnHtml}
+          </div>
+        `;
+      } else {
+        operationsHtml = `<span style="color:var(--muted); font-size:12px;">已完成</span>`;
+      }
 
       return `
         <tr>
@@ -164,7 +235,7 @@ export async function renderRiskAlerts(page = 1) {
           <td class="content-cell" style="white-space: pre-line; font-size:12px;">${escapeHtml(item.content || '-')}</td>
           <td>${handledBadge}</td>
           <td>${statusBadge}</td>
-          <td style="text-align: center;">${actionCell}</td>
+          <td style="text-align: center;">${operationsHtml}</td>
         </tr>
       `;
     }).join('');
@@ -183,9 +254,104 @@ export async function renderRiskAlerts(page = 1) {
             updateRiskSummaryAndBanner()
           ]);
         } catch (err) {
-          alert('操作失败: ' + (err instanceof Error ? err.message : String(err)));
+          showAlert({ title: '操作失败', message: (err instanceof Error ? err.message : String(err)), isError: true });
           btn.disabled = false;
           btn.textContent = '标为已排查';
+        }
+      };
+    });
+
+    // 绑定封禁按钮事件
+    tbody.querySelectorAll('.ban-alert-btn').forEach(btn => {
+      btn.onclick = async () => {
+        const ip = btn.dataset.ip;
+        const alertId = btn.dataset.id ? Number(btn.dataset.id) : undefined;
+        if (!ip) return;
+        const ok = await showConfirm({
+          eyebrow: '安全防御',
+          title: '确认加入封禁黑名单',
+          message: `确定要将可疑 IP【${ip}】加入封禁黑名单吗？\n\n封禁后，该 IP 将被系统全局永久拦截（需管理员手动解封，不会自动解封），且对应告警将自动标为已排查。`,
+          confirmText: '确认封禁并标记',
+          isDanger: true
+        });
+        if (!ok) return;
+        btn.disabled = true;
+        btn.textContent = '封禁中...';
+        try {
+          await api('/admin/api/risks/bans', { method: 'POST', body: JSON.stringify({ ip, alertId }) });
+          if (!riskState.bannedIps) riskState.bannedIps = new Set();
+          riskState.bannedIps.add(ip);
+          await Promise.all([
+            renderBans(),
+            renderRiskAlerts(riskState.alertsPage),
+            updateRiskSummaryAndBanner()
+          ]);
+        } catch (err) {
+          showAlert({ title: '封禁失败', message: (err instanceof Error ? err.message : String(err)), isError: true });
+          btn.disabled = false;
+          btn.textContent = '封禁此 IP';
+        }
+      };
+    });
+
+    // 绑定已封禁解封按钮事件
+    tbody.querySelectorAll('.unban-alert-btn').forEach(btn => {
+      btn.onclick = async () => {
+        const ip = btn.dataset.ip;
+        if (!ip) return;
+        const ok = await showConfirm({
+          eyebrow: '安全设置',
+          title: '解除 IP 拦截限制',
+          message: `确定要解除对 IP【${ip}】的全局拦截限制吗？\n\n解除后，该 IP 将恢复正常访问权限。`,
+          confirmText: '确认解封',
+          isDanger: false
+        });
+        if (!ok) return;
+        btn.disabled = true;
+        btn.textContent = '解封中...';
+        try {
+          await api(`/admin/api/risks/bans/${encodeURIComponent(ip)}`, { method: 'DELETE' });
+          if (riskState.bannedIps) riskState.bannedIps.delete(ip);
+          await Promise.all([
+            renderBans(),
+            renderRiskAlerts(riskState.alertsPage),
+            updateRiskSummaryAndBanner()
+          ]);
+        } catch (err) {
+          showAlert({ title: '解封失败', message: (err instanceof Error ? err.message : String(err)), isError: true });
+          btn.disabled = false;
+          btn.textContent = '已封禁 (解封)';
+        }
+      };
+    });
+
+    // 绑定手动输入封禁事件
+    tbody.querySelectorAll('.manual-ban-alert-btn').forEach(btn => {
+      btn.onclick = async () => {
+        const alertId = btn.dataset.id ? Number(btn.dataset.id) : undefined;
+        const inputIp = await showPrompt({
+          eyebrow: '安全防御',
+          title: '封禁可疑客户端 IP',
+          message: '请输入要加入全局黑名单拦截的客户端 IP 地址：',
+          placeholder: '例如：192.168.1.100',
+          confirmText: '立即封禁',
+          isDanger: true,
+          validator: val => isValidIp(val) ? '' : '请输入合法有效的 IPv4 或 IPv6 地址'
+        });
+        if (!inputIp) return;
+        const ip = inputIp.trim();
+        try {
+          await api('/admin/api/risks/bans', { method: 'POST', body: JSON.stringify({ ip, alertId }) });
+          if (!riskState.bannedIps) riskState.bannedIps = new Set();
+          riskState.bannedIps.add(ip);
+          await Promise.all([
+            renderBans(),
+            renderRiskAlerts(riskState.alertsPage),
+            updateRiskSummaryAndBanner()
+          ]);
+          showAlert({ title: '封禁成功', message: `IP【${ip}】已成功加入系统全局封禁名单，关联告警已自动标为已排查！` });
+        } catch (err) {
+          showAlert({ title: '封禁失败', message: (err instanceof Error ? err.message : String(err)), isError: true });
         }
       };
     });
@@ -262,6 +428,38 @@ export function initRiskViewListeners() {
     };
   }
 
+  // 手动封禁 IP 按钮
+  const manualBanBtn = $('#risk-manual-ban-btn');
+  if (manualBanBtn && !manualBanBtn.dataset.bound) {
+    manualBanBtn.dataset.bound = 'true';
+    manualBanBtn.onclick = async () => {
+      const inputIp = await showPrompt({
+        eyebrow: '安全防御',
+        title: '手动添加封禁 IP',
+        message: '请输入要加入全局拦截黑名单的客户端 IP 地址：',
+        placeholder: '例如：203.0.113.195',
+        confirmText: '立即封禁',
+        isDanger: true,
+        validator: val => isValidIp(val) ? '' : '请输入合法有效的 IPv4 或 IPv6 地址'
+      });
+      if (!inputIp) return;
+      const ip = inputIp.trim();
+      try {
+        await api('/admin/api/risks/bans', { method: 'POST', body: JSON.stringify({ ip }) });
+        if (!riskState.bannedIps) riskState.bannedIps = new Set();
+        riskState.bannedIps.add(ip);
+        await Promise.all([
+          renderBans(),
+          renderRiskAlerts(riskState.alertsPage),
+          updateRiskSummaryAndBanner()
+        ]);
+        showAlert({ title: '封禁成功', message: `IP【${ip}】已成功加入系统全局封禁名单！` });
+      } catch (err) {
+        showAlert({ title: '封禁失败', message: (err instanceof Error ? err.message : String(err)), isError: true });
+      }
+    };
+  }
+
   // 告警分页按钮
   const alertPrev = $('#risk-alerts-prev');
   const alertNext = $('#risk-alerts-next');
@@ -306,6 +504,15 @@ export function initRiskViewListeners() {
   if (resolveAllBtn && !resolveAllBtn.dataset.bound) {
     resolveAllBtn.dataset.bound = 'true';
     resolveAllBtn.onclick = async () => {
+      const ok = await showConfirm({
+        eyebrow: '批量排查',
+        title: '全部标为已排查确认',
+        message: '确定要将当前所有待排查的安全告警批量标为已排查吗？',
+        confirmText: '确认标记',
+        isDanger: false
+      });
+      if (!ok) return;
+
       resolveAllBtn.disabled = true;
       resolveAllBtn.textContent = '处理中...';
       try {
@@ -315,7 +522,7 @@ export function initRiskViewListeners() {
           updateRiskSummaryAndBanner()
         ]);
       } catch (err) {
-        alert('批量处理失败: ' + (err instanceof Error ? err.message : String(err)));
+        showAlert({ title: '批量处理失败', message: (err instanceof Error ? err.message : String(err)), isError: true });
       } finally {
         resolveAllBtn.disabled = false;
         resolveAllBtn.textContent = '✓ 全部标为已排查';

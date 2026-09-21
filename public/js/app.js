@@ -7,6 +7,8 @@ import { renderHistory, fetchHistory, initHistoryView } from './views/history.js
 import { fetchLogDates, initLogsView } from './views/logs.js';
 import { loadAndPopulateSettings, initSettingsView } from './views/settings.js';
 
+import { initModalListeners } from './modal.js';
+
 let pendingConfirmation = null;
 
 function confirmAction(message, action, messageSelector = '') {
@@ -71,11 +73,23 @@ async function authenticate() {
     $('#app-view').hidden = false;
     $('#operator-name').textContent = session.username;
     await refreshAll();
-  } catch {
+  } catch (err) {
     $('#login-view').hidden = false;
     $('#app-view').hidden = true;
+    if (err?.body?.blocked || err?.status === 429) {
+      showMessage('#login-error', err?.body?.error || '当前客户端 IP 已被系统封禁，拒绝访问', 'failed');
+    }
   }
 }
+
+window.addEventListener('session-terminated', event => {
+  $('#login-view').hidden = false;
+  $('#app-view').hidden = true;
+  const detail = event.detail;
+  if (detail?.body?.blocked || detail?.status === 429) {
+    showMessage('#login-error', detail?.body?.error || '当前客户端 IP 已被系统封禁，会话已强制下线', 'failed');
+  }
+});
 
 function syncPushMode() {
   const mode = $('input[name="pushMode"]:checked')?.value || 'text';
@@ -137,7 +151,8 @@ $('#credential-form').addEventListener('submit', async event => {
   }
   try {
     const result = await api('/admin/api/credentials', { method: 'POST', body: JSON.stringify({ name, kind, upstreamIds }) });
-    state.credentials.unshift(result.credential);
+    const credential = result.credential || result;
+    state.credentials.unshift(credential);
     renderCredentials();
     form.reset();
     renderUpstreams();
@@ -275,7 +290,8 @@ $('#logout-button').addEventListener('click', async () => {
   location.reload();
 });
 
-// 初始化各子视图的事件监听器
+// 初始化各子视图与系统模态弹窗的事件监听器
+initModalListeners();
 initTheme();
 initHistoryView();
 initLogsView();

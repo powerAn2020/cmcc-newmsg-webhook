@@ -100,4 +100,54 @@ describe('SQLite store', () => {
     expect(updated.rateLimitMsgDayMax).toBe(100);
     store.close();
   });
+
+  it('manages manual and automatic IP bans with correct reason and permanent manual lock', async () => {
+    const store = new Store(':memory:', 'test-encryption-key');
+    // 1. 手动封禁 IP（永久生效，lockedUntil 为 null）
+    const banRes = await store.banIp('1.1.1.1');
+    expect(banRes.lockedUntil).toBeNull();
+
+    // 手动封禁无自动解封，永久拒绝且无 retryAfter
+    const manualAllowed = await store.loginAllowed('1.1.1.1');
+    expect(manualAllowed.allowed).toBe(false);
+    expect(manualAllowed.retryAfter).toBeUndefined();
+
+    // 2. 连续失败达到阈值自动封禁 IP（临时锁定）
+    for (let i = 0; i < 5; i++) {
+      await store.recordLoginFailure('2.2.2.2');
+    }
+    const autoAllowed = await store.loginAllowed('2.2.2.2');
+    expect(autoAllowed.allowed).toBe(false);
+    expect(autoAllowed.retryAfter).toBeGreaterThan(0);
+
+    const lockedIps = await store.listLockedIps();
+    expect(lockedIps).toHaveLength(2);
+
+    const manual = lockedIps.find(i => i.ip === '1.1.1.1');
+    expect(manual).toBeDefined();
+    expect(manual?.failedCount).toBe(0);
+    expect(manual?.lockedUntil).toBeNull();
+    expect(manual?.reason).toBe('手动封禁');
+
+    const auto = lockedIps.find(i => i.ip === '2.2.2.2');
+    expect(auto).toBeDefined();
+    expect(auto?.failedCount).toBe(5);
+    expect(auto?.lockedUntil).not.toBeNull();
+    expect(auto?.reason).toBe('连续失败 5 次');
+
+    // 风险摘要统计计数同时覆盖两者，并细分自动与手动封禁
+    const summary = await store.getSecurityRiskSummary();
+    expect(summary.lockedCount).toBe(2);
+    expect(summary.autoLockedCount).toBe(1);
+    expect(summary.manualLockedCount).toBe(1);
+
+    // 3. 解除手动封禁
+    expect(await store.unbanIp('1.1.1.1')).toBe(true);
+    expect((await store.loginAllowed('1.1.1.1')).allowed).toBe(true);
+    const afterUnban = await store.listLockedIps();
+    expect(afterUnban).toHaveLength(1);
+    expect(afterUnban[0].ip).toBe('2.2.2.2');
+
+    store.close();
+  });
 });

@@ -94,13 +94,17 @@ export interface IStore {
   setLastLoginIp(ip: string): Promise<void>;
   getSecuritySettings(): Promise<SecurityAlertSettings>;
   updateSecuritySettings(settings: Partial<SecurityAlertSettings>): Promise<void>;
-  listLockedIps(): Promise<{ ip: string; failedCount: number; firstFailedAt: string; lockedUntil: string }[]>;
+  listLockedIps(): Promise<{ ip: string; failedCount: number; firstFailedAt: string; lockedUntil: string | null; reason?: string }[]>;
+  banIp(ip: string, durationMs?: number): Promise<{ ip: string; lockedUntil: string | null }>;
   unbanIp(ip: string): Promise<boolean>;
   listSecurityAlerts(page?: number, pageSize?: number): Promise<{ items: HistoryEntry[]; total: number; page: number; pageSize: number; totalPages: number }>;
   resolveSecurityAlert(id: number): Promise<boolean>;
   resolveAllSecurityAlerts(): Promise<number>;
+  resolveSecurityAlertsByIp(ip: string): Promise<number>;
   getSecurityRiskSummary(): Promise<{
     lockedCount: number;
+    autoLockedCount: number;
+    manualLockedCount: number;
     todayAlertsCount: number;
     totalAlertsCount: number;
     recentAlerts: HistoryEntry[];
@@ -297,8 +301,10 @@ export class SqliteStore implements IStore {
   }
 
   async loginAllowed(ip: string): Promise<{ allowed: boolean; retryAfter?: number }> {
-    const row = this.db.prepare('SELECT * FROM login_attempts WHERE ip = ?').get(ip) as { locked_until: string | null } | undefined;
-    if (!row?.locked_until || Date.parse(row.locked_until) <= Date.now()) return { allowed: true };
+    const row = this.db.prepare('SELECT failed_count, locked_until FROM login_attempts WHERE ip = ?').get(ip) as { failed_count: number; locked_until: string | null } | undefined;
+    if (!row) return { allowed: true };
+    if (row.failed_count === 0) return { allowed: false };
+    if (!row.locked_until || Date.parse(row.locked_until) <= Date.now()) return { allowed: true };
     return { allowed: false, retryAfter: Math.ceil((Date.parse(row.locked_until) - Date.now()) / 1000) };
   }
 
@@ -323,23 +329,37 @@ export class SqliteStore implements IStore {
     this.db.prepare('DELETE FROM login_attempts WHERE ip = ?').run(ip);
   }
 
+  async banIp(ip: string, _durationMs?: number): Promise<{ ip: string; lockedUntil: string | null }> {
+    const firstFailedAt = now();
+    this.db.prepare(`
+      INSERT INTO login_attempts (ip, failed_count, first_failed_at, locked_until)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(ip) DO UPDATE SET
+        failed_count = excluded.failed_count,
+        first_failed_at = excluded.first_failed_at,
+        locked_until = excluded.locked_until
+    `).run(ip, 0, firstFailedAt, null);
+    return { ip, lockedUntil: null };
+  }
+
   async unbanIp(ip: string): Promise<boolean> {
     const result = this.db.prepare('DELETE FROM login_attempts WHERE ip = ?').run(ip);
     return result.changes > 0;
   }
 
-  async listLockedIps(): Promise<{ ip: string; failedCount: number; firstFailedAt: string; lockedUntil: string }[]> {
+  async listLockedIps(): Promise<{ ip: string; failedCount: number; firstFailedAt: string; lockedUntil: string | null; reason?: string }[]> {
     const rows = this.db.prepare(`
       SELECT ip, failed_count, first_failed_at, locked_until
       FROM login_attempts
-      WHERE locked_until IS NOT NULL AND locked_until > ?
-      ORDER BY locked_until DESC
+      WHERE failed_count = 0 OR (locked_until IS NOT NULL AND locked_until > ?)
+      ORDER BY (CASE WHEN failed_count = 0 THEN 1 ELSE 0 END) DESC, locked_until DESC, first_failed_at DESC
     `).all(now()) as any[];
     return rows.map(r => ({
       ip: r.ip,
       failedCount: r.failed_count,
       firstFailedAt: r.first_failed_at,
-      lockedUntil: r.locked_until
+      lockedUntil: r.locked_until,
+      reason: r.failed_count === 0 ? '手动封禁' : `连续失败 ${r.failed_count} 次`
     }));
   }
 
@@ -371,8 +391,17 @@ export class SqliteStore implements IStore {
     return Number(result.changes);
   }
 
+  async resolveSecurityAlertsByIp(ip: string): Promise<number> {
+    const result = this.db.prepare(
+      "UPDATE notification_history SET handled_at = ? WHERE source = 'system' AND handled_at IS NULL AND (content LIKE ? OR title LIKE ?)"
+    ).run(now(), `%${ip}%`, `%${ip}%`);
+    return Number(result.changes);
+  }
+
   async getSecurityRiskSummary(): Promise<{
     lockedCount: number;
+    autoLockedCount: number;
+    manualLockedCount: number;
     todayAlertsCount: number;
     totalAlertsCount: number;
     recentAlerts: HistoryEntry[];
@@ -382,14 +411,19 @@ export class SqliteStore implements IStore {
     todayStart.setHours(0, 0, 0, 0);
     const todayIso = todayStart.toISOString();
 
-    const lockedRow = this.db.prepare('SELECT COUNT(1) as count FROM login_attempts WHERE locked_until IS NOT NULL AND locked_until > ?').get(currentTime) as { count: number };
+    const autoRow = this.db.prepare('SELECT COUNT(1) as count FROM login_attempts WHERE failed_count > 0 AND locked_until IS NOT NULL AND locked_until > ?').get(currentTime) as { count: number };
+    const manualRow = this.db.prepare('SELECT COUNT(1) as count FROM login_attempts WHERE failed_count = 0').get() as { count: number };
     const todayRow = this.db.prepare("SELECT COUNT(1) as count FROM notification_history WHERE source = 'system' AND handled_at IS NULL AND created_at >= ?").get(todayIso) as { count: number };
     const totalRow = this.db.prepare("SELECT COUNT(1) as count FROM notification_history WHERE source = 'system'").get() as { count: number };
 
     const recent = (await this.listSecurityAlerts(1, 5)).items;
+    const autoLockedCount = autoRow?.count ?? 0;
+    const manualLockedCount = manualRow?.count ?? 0;
 
     return {
-      lockedCount: lockedRow?.count ?? 0,
+      lockedCount: autoLockedCount + manualLockedCount,
+      autoLockedCount,
+      manualLockedCount,
       todayAlertsCount: todayRow?.count ?? 0,
       totalAlertsCount: totalRow?.count ?? 0,
       recentAlerts: recent
@@ -645,9 +679,11 @@ export class PgStore implements IStore {
   }
 
   async loginAllowed(ip: string): Promise<{ allowed: boolean; retryAfter?: number }> {
-    const res = await this.pool.query('SELECT * FROM login_attempts WHERE ip = $1', [ip]);
+    const res = await this.pool.query('SELECT failed_count, locked_until FROM login_attempts WHERE ip = $1', [ip]);
     const row = res.rows[0];
-    if (!row?.locked_until || Date.parse(row.locked_until) <= Date.now()) return { allowed: true };
+    if (!row) return { allowed: true };
+    if (row.failed_count === 0) return { allowed: false };
+    if (!row.locked_until || Date.parse(row.locked_until) <= Date.now()) return { allowed: true };
     return { allowed: false, retryAfter: Math.ceil((Date.parse(row.locked_until) - Date.now()) / 1000) };
   }
 
@@ -676,24 +712,39 @@ export class PgStore implements IStore {
     await this.pool.query('DELETE FROM login_attempts WHERE ip = $1', [ip]);
   }
 
+  async banIp(ip: string, _durationMs?: number): Promise<{ ip: string; lockedUntil: string | null }> {
+    const firstFailedAt = now();
+    await this.pool.query(
+      `INSERT INTO login_attempts (ip, failed_count, first_failed_at, locked_until)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (ip) DO UPDATE SET
+         failed_count = EXCLUDED.failed_count,
+         first_failed_at = EXCLUDED.first_failed_at,
+         locked_until = EXCLUDED.locked_until`,
+      [ip, 0, firstFailedAt, null]
+    );
+    return { ip, lockedUntil: null };
+  }
+
   async unbanIp(ip: string): Promise<boolean> {
     const res = await this.pool.query('DELETE FROM login_attempts WHERE ip = $1', [ip]);
     return (res.rowCount ?? 0) > 0;
   }
 
-  async listLockedIps(): Promise<{ ip: string; failedCount: number; firstFailedAt: string; lockedUntil: string }[]> {
+  async listLockedIps(): Promise<{ ip: string; failedCount: number; firstFailedAt: string; lockedUntil: string | null; reason?: string }[]> {
     const res = await this.pool.query(
       `SELECT ip, failed_count, first_failed_at, locked_until
        FROM login_attempts
-       WHERE locked_until IS NOT NULL AND locked_until > $1
-       ORDER BY locked_until DESC`,
+       WHERE failed_count = 0 OR (locked_until IS NOT NULL AND locked_until > $1)
+       ORDER BY (CASE WHEN failed_count = 0 THEN 1 ELSE 0 END) DESC, locked_until DESC, first_failed_at DESC`,
       [now()]
     );
     return res.rows.map((r: any) => ({
       ip: r.ip,
       failedCount: r.failed_count,
       firstFailedAt: r.first_failed_at,
-      lockedUntil: r.locked_until
+      lockedUntil: r.locked_until,
+      reason: r.failed_count === 0 ? '手动封禁' : `连续失败 ${r.failed_count} 次`
     }));
   }
 
@@ -729,8 +780,18 @@ export class PgStore implements IStore {
     return Number(res.rowCount ?? 0);
   }
 
+  async resolveSecurityAlertsByIp(ip: string): Promise<number> {
+    const res = await this.pool.query(
+      "UPDATE notification_history SET handled_at = $1 WHERE source = 'system' AND handled_at IS NULL AND (content LIKE $2 OR title LIKE $2)",
+      [now(), `%${ip}%`]
+    );
+    return Number(res.rowCount ?? 0);
+  }
+
   async getSecurityRiskSummary(): Promise<{
     lockedCount: number;
+    autoLockedCount: number;
+    manualLockedCount: number;
     todayAlertsCount: number;
     totalAlertsCount: number;
     recentAlerts: HistoryEntry[];
@@ -740,14 +801,19 @@ export class PgStore implements IStore {
     todayStart.setHours(0, 0, 0, 0);
     const todayIso = todayStart.toISOString();
 
-    const lockedRes = await this.pool.query('SELECT COUNT(1) as count FROM login_attempts WHERE locked_until IS NOT NULL AND locked_until > $1', [currentTime]);
+    const autoRes = await this.pool.query('SELECT COUNT(1) as count FROM login_attempts WHERE failed_count > 0 AND locked_until IS NOT NULL AND locked_until > $1', [currentTime]);
+    const manualRes = await this.pool.query('SELECT COUNT(1) as count FROM login_attempts WHERE failed_count = 0');
     const todayRes = await this.pool.query("SELECT COUNT(1) as count FROM notification_history WHERE source = 'system' AND handled_at IS NULL AND created_at >= $1", [todayIso]);
     const totalRes = await this.pool.query("SELECT COUNT(1) as count FROM notification_history WHERE source = 'system'");
 
     const recent = (await this.listSecurityAlerts(1, 5)).items;
+    const autoLockedCount = Number(autoRes.rows[0]?.count ?? 0);
+    const manualLockedCount = Number(manualRes.rows[0]?.count ?? 0);
 
     return {
-      lockedCount: Number(lockedRes.rows[0]?.count ?? 0),
+      lockedCount: autoLockedCount + manualLockedCount,
+      autoLockedCount,
+      manualLockedCount,
       todayAlertsCount: Number(todayRes.rows[0]?.count ?? 0),
       totalAlertsCount: Number(totalRes.rows[0]?.count ?? 0),
       recentAlerts: recent
@@ -1006,9 +1072,11 @@ export class MysqlStore implements IStore {
   }
 
   async loginAllowed(ip: string): Promise<{ allowed: boolean; retryAfter?: number }> {
-    const [rows]: any = await this.pool.query('SELECT * FROM login_attempts WHERE ip = ?', [ip]);
+    const [rows]: any = await this.pool.query('SELECT failed_count, locked_until FROM login_attempts WHERE ip = ?', [ip]);
     const row = rows[0];
-    if (!row?.locked_until || Date.parse(row.locked_until) <= Date.now()) return { allowed: true };
+    if (!row) return { allowed: true };
+    if (Number(row.failed_count) === 0) return { allowed: false };
+    if (!row.locked_until || Date.parse(row.locked_until) <= Date.now()) return { allowed: true };
     return { allowed: false, retryAfter: Math.ceil((Date.parse(row.locked_until) - Date.now()) / 1000) };
   }
 
@@ -1037,24 +1105,35 @@ export class MysqlStore implements IStore {
     await this.pool.query('DELETE FROM login_attempts WHERE ip = ?', [ip]);
   }
 
+  async banIp(ip: string, _durationMs?: number): Promise<{ ip: string; lockedUntil: string | null }> {
+    const firstFailedAt = now();
+    await this.pool.query(
+      `INSERT INTO login_attempts (ip, failed_count, first_failed_at, locked_until) VALUES (?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE failed_count = VALUES(failed_count), first_failed_at = VALUES(first_failed_at), locked_until = VALUES(locked_until)`,
+      [ip, 0, firstFailedAt, null]
+    );
+    return { ip, lockedUntil: null };
+  }
+
   async unbanIp(ip: string): Promise<boolean> {
     const [res]: any = await this.pool.query('DELETE FROM login_attempts WHERE ip = ?', [ip]);
     return Number(res.affectedRows ?? 0) > 0;
   }
 
-  async listLockedIps(): Promise<{ ip: string; failedCount: number; firstFailedAt: string; lockedUntil: string }[]> {
+  async listLockedIps(): Promise<{ ip: string; failedCount: number; firstFailedAt: string; lockedUntil: string | null; reason?: string }[]> {
     const [rows]: any = await this.pool.query(
       `SELECT ip, failed_count, first_failed_at, locked_until
        FROM login_attempts
-       WHERE locked_until IS NOT NULL AND locked_until > ?
-       ORDER BY locked_until DESC`,
+       WHERE failed_count = 0 OR (locked_until IS NOT NULL AND locked_until > ?)
+       ORDER BY (CASE WHEN failed_count = 0 THEN 1 ELSE 0 END) DESC, locked_until DESC, first_failed_at DESC`,
       [now()]
     );
     return (rows as any[]).map(r => ({
       ip: r.ip,
       failedCount: r.failed_count,
       firstFailedAt: r.first_failed_at,
-      lockedUntil: r.locked_until
+      lockedUntil: r.locked_until,
+      reason: r.failed_count === 0 ? '手动封禁' : `连续失败 ${r.failed_count} 次`
     }));
   }
 
@@ -1090,8 +1169,18 @@ export class MysqlStore implements IStore {
     return Number(res.affectedRows ?? 0);
   }
 
+  async resolveSecurityAlertsByIp(ip: string): Promise<number> {
+    const [res]: any = await this.pool.query(
+      "UPDATE notification_history SET handled_at = ? WHERE source = 'system' AND handled_at IS NULL AND (content LIKE ? OR title LIKE ?)",
+      [now(), `%${ip}%`, `%${ip}%`]
+    );
+    return Number(res.affectedRows ?? 0);
+  }
+
   async getSecurityRiskSummary(): Promise<{
     lockedCount: number;
+    autoLockedCount: number;
+    manualLockedCount: number;
     todayAlertsCount: number;
     totalAlertsCount: number;
     recentAlerts: HistoryEntry[];
@@ -1101,14 +1190,19 @@ export class MysqlStore implements IStore {
     todayStart.setHours(0, 0, 0, 0);
     const todayIso = todayStart.toISOString();
 
-    const [lockedRows]: any = await this.pool.query('SELECT COUNT(1) as count FROM login_attempts WHERE locked_until IS NOT NULL AND locked_until > ?', [currentTime]);
+    const [autoRows]: any = await this.pool.query('SELECT COUNT(1) as count FROM login_attempts WHERE failed_count > 0 AND locked_until IS NOT NULL AND locked_until > ?', [currentTime]);
+    const [manualRows]: any = await this.pool.query('SELECT COUNT(1) as count FROM login_attempts WHERE failed_count = 0');
     const [todayRows]: any = await this.pool.query("SELECT COUNT(1) as count FROM notification_history WHERE source = 'system' AND handled_at IS NULL AND created_at >= ?", [todayIso]);
     const [totalRows]: any = await this.pool.query("SELECT COUNT(1) as count FROM notification_history WHERE source = 'system'");
 
     const recent = (await this.listSecurityAlerts(1, 5)).items;
+    const autoLockedCount = Number(autoRows[0]?.count ?? 0);
+    const manualLockedCount = Number(manualRows[0]?.count ?? 0);
 
     return {
-      lockedCount: Number(lockedRows[0]?.count ?? 0),
+      lockedCount: autoLockedCount + manualLockedCount,
+      autoLockedCount,
+      manualLockedCount,
       todayAlertsCount: Number(todayRows[0]?.count ?? 0),
       totalAlertsCount: Number(totalRows[0]?.count ?? 0),
       recentAlerts: recent
