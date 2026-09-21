@@ -10,8 +10,19 @@ services:
     env_file:
       - path: .env
         required: false
+      - path: .env.dockhand
+        required: false
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
     environment:
       - TZ=Asia/Shanghai
+      - PORT
+      - HOST
+      - ADMIN_USERNAME
+      - ADMIN_PASSWORD
+      - CONFIG_ENCRYPTION_KEY
+      - TRUST_PROXY
+      - DB_TYPE
+      - DATABASE_URL
+      - RATE_LIMIT_MSG_MIN_MAX
