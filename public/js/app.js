@@ -143,6 +143,7 @@ $('#credential-form').addEventListener('submit', async event => {
   const form = event.currentTarget;
   const name = form.elements.name.value.trim();
   const kind = form.elements.kind.value;
+  const secret = form.elements.secret?.value?.trim() || undefined;
   const upstreamIds = $$('input[name="upstreamIds"]:checked').map(input => Number(input.value));
   showMessage('#credential-message', '');
   if (!upstreamIds.length) {
@@ -150,9 +151,11 @@ $('#credential-form').addEventListener('submit', async event => {
     return;
   }
   try {
-    const result = await api('/admin/api/credentials', { method: 'POST', body: JSON.stringify({ name, kind, upstreamIds }) });
+    const result = await api('/admin/api/credentials', { method: 'POST', body: JSON.stringify({ name, kind, secret, upstreamIds }) });
     const credential = result.credential || result;
-    state.credentials.unshift(credential);
+    if (credential && typeof credential === 'object') {
+      state.credentials = [credential, ...(state.credentials || []).filter(Boolean)];
+    }
     renderCredentials();
     form.reset();
     renderUpstreams();
