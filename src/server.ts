@@ -1230,7 +1230,7 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       return reply.code(201).send(await store.addUpstream(name, apiKey));
     } catch {
       request.log.warn({ name, apiKey: maskSecret(apiKey) }, 'upstream verification failed');
-      return reply.badRequest('upstream API Key verification failed');
+      return reply.badRequest('上游通道 API Key 验证失败或通道已存在');
     }
   });
   app.delete<{ Params: { id: string } }>('/admin/api/upstreams/:id', { preHandler: requireAdmin }, async (request, reply) => {
@@ -1253,7 +1253,7 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       const credential = await store.createCredential(name, kind, secret, upstreamIds);
       return reply.code(201).send({ ...credential, secret });
     } catch {
-      return reply.badRequest('credential name or secret already exists');
+      return reply.badRequest('凭据名称或访问密钥已存在，请勿重复创建');
     }
   });
   app.delete<{ Params: { id: string } }>('/admin/api/credentials/:id', { preHandler: requireAdmin }, async (request, reply) => {

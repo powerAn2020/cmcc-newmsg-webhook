@@ -141,6 +141,7 @@ $('#upstream-form').addEventListener('submit', async event => {
 $('#credential-form').addEventListener('submit', async event => {
   event.preventDefault();
   const form = event.currentTarget;
+  const submitBtn = $('#credential-submit');
   const name = form.elements.name.value.trim();
   const kind = form.elements.kind.value;
   const secret = form.elements.secret?.value?.trim() || undefined;
@@ -150,6 +151,7 @@ $('#credential-form').addEventListener('submit', async event => {
     showMessage('#credential-message', '请至少勾选一个绑定的上游通道。');
     return;
   }
+  if (submitBtn) submitBtn.disabled = true;
   try {
     const result = await api('/admin/api/credentials', { method: 'POST', body: JSON.stringify({ name, kind, secret, upstreamIds }) });
     const credential = result.credential || result;
@@ -163,6 +165,8 @@ $('#credential-form').addEventListener('submit', async event => {
     $('#secret-dialog').showModal();
   } catch (error) {
     showMessage('#credential-message', error.message);
+  } finally {
+    if (submitBtn) submitBtn.disabled = false;
   }
 });
 
