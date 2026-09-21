@@ -35,6 +35,10 @@ export async function loadAndPopulateSettings() {
     if (form.elements.rateLimitIpMinMax) form.elements.rateLimitIpMinMax.value = settings.rateLimitIpMinMax ?? 30;
     if (form.elements.rateLimitDuplicateWindowSec) form.elements.rateLimitDuplicateWindowSec.value = settings.rateLimitDuplicateWindowSec ?? 300;
     if (form.elements.notifyOnRateLimit) form.elements.notifyOnRateLimit.checked = settings.notifyOnRateLimit !== false;
+    if (form.elements.backupGotifyEnabled) form.elements.backupGotifyEnabled.checked = Boolean(settings.backupGotifyEnabled);
+    if (form.elements.backupGotifyUrl) form.elements.backupGotifyUrl.value = settings.backupGotifyUrl || '';
+    if (form.elements.backupGotifyToken) form.elements.backupGotifyToken.value = settings.backupGotifyToken || '';
+    if (form.elements.backupGotifyThreshold) form.elements.backupGotifyThreshold.value = settings.backupGotifyThreshold ?? 3;
   } catch (error) {
     console.error('Failed to load settings:', error);
   }
@@ -85,6 +89,21 @@ export function initSettingsView() {
     const rateLimitIpMinMax = Number(form.elements.rateLimitIpMinMax?.value ?? 30);
     const rateLimitDuplicateWindowSec = Number(form.elements.rateLimitDuplicateWindowSec?.value ?? 300);
     const notifyOnRateLimit = Boolean(form.elements.notifyOnRateLimit?.checked);
+    const backupGotifyEnabled = Boolean(form.elements.backupGotifyEnabled?.checked);
+    const backupGotifyUrl = form.elements.backupGotifyUrl?.value?.trim() || '';
+    const backupGotifyToken = form.elements.backupGotifyToken?.value?.trim() || '';
+    const backupGotifyThreshold = Number(form.elements.backupGotifyThreshold?.value) || 3;
+
+    if (backupGotifyEnabled) {
+      if (!backupGotifyUrl) {
+        showMessage('#settings-message', '启用 Gotify 备用告警时，必须提供 Gotify 服务端 URL。');
+        return;
+      }
+      if (!backupGotifyToken) {
+        showMessage('#settings-message', '启用 Gotify 备用告警时，必须提供 Gotify App Token。');
+        return;
+      }
+    }
 
     if (!adminUsername) {
       showMessage('#settings-message', '管理员用户名不能为空。');
@@ -172,7 +191,11 @@ export function initSettingsView() {
         rateLimitMsgDayMax,
         rateLimitIpMinMax,
         rateLimitDuplicateWindowSec,
-        notifyOnRateLimit
+        notifyOnRateLimit,
+        backupGotifyEnabled,
+        backupGotifyUrl,
+        backupGotifyToken,
+        backupGotifyThreshold
       };
       if (adminPassword) {
         payload.adminPassword = adminPassword;

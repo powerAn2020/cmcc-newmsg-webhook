@@ -1085,6 +1085,89 @@ describe('admin push API', () => {
       // 验证 Cookie 清除指令存在
       expect(kickedRes.headers['set-cookie']).toBeDefined();
     });
+
+    it('triggers Gotify backup alert notification when upstream delivery continuously fails beyond threshold', async () => {
+      // 1. 配置启用 Gotify 备用通道并设置阈值为 3
+      const settingsRes = await app.inject({
+        method: 'POST',
+        url: '/admin/api/settings',
+        headers: { cookie },
+        payload: {
+          backupGotifyEnabled: true,
+          backupGotifyUrl: 'https://gotify.test.local',
+          backupGotifyToken: 'mock-gotify-token',
+          backupGotifyThreshold: 3
+        }
+      });
+      expect(settingsRes.statusCode).toBe(200);
+
+      // 验证设置读取回显
+      const getSettings = await app.inject({
+        method: 'GET',
+        url: '/admin/api/settings',
+        headers: { cookie }
+      });
+      expect(getSettings.json().backupGotifyEnabled).toBe(true);
+      expect(getSettings.json().backupGotifyThreshold).toBe(3);
+
+      // 2. Mock 全局 fetch 拦截发往 Gotify 的网络请求
+      const originalFetch = global.fetch;
+      const fetchMock = vi.fn(async (url: any, opts: any) => {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => '{"id":1}'
+        } as any;
+      });
+      global.fetch = fetchMock;
+
+      try {
+        // 3. 让 pool.send 模拟上游断连报错
+        pool.send.mockRejectedValue(new Error('CMCC WS Connection Dropped'));
+
+        // 第一次失败 (count=1) -> 尚未达阈值 3，不触发 Gotify
+        const res1 = await app.inject({
+          method: 'POST',
+          url: '/admin/api/push',
+          headers: { cookie },
+          payload: { message: 'Business Msg 1', upstreamIds: [1] }
+        });
+        expect(res1.statusCode).toBe(502);
+        expect(fetchMock).not.toHaveBeenCalled();
+
+        // 第二次失败 (count=2) -> 尚未达阈值 3，不触发 Gotify
+        const res2 = await app.inject({
+          method: 'POST',
+          url: '/admin/api/push',
+          headers: { cookie },
+          payload: { message: 'Business Msg 2', upstreamIds: [1] }
+        });
+        expect(res2.statusCode).toBe(502);
+        expect(fetchMock).not.toHaveBeenCalled();
+
+        // 第三次失败 (count=3) -> 达到阈值 3，立即触发 Gotify 告警！
+        const res3 = await app.inject({
+          method: 'POST',
+          url: '/admin/api/push',
+          headers: { cookie },
+          payload: { message: 'Secret Business Data', upstreamIds: [1] }
+        });
+        expect(res3.statusCode).toBe(502);
+
+        // 验证 Gotify fetch 接口被调用
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        const [callUrl, callOpts] = fetchMock.mock.calls[0];
+        expect(callUrl).toContain('https://gotify.test.local/message?token=mock-gotify-token');
+        const parsedBody = JSON.parse(callOpts.body);
+        expect(parsedBody.title).toBe('【系统告警】上游通道消息发送失败告警');
+        expect(parsedBody.message).toContain('连续失败次数: 3 次');
+        expect(parsedBody.message).toContain('CMCC WS Connection Dropped');
+        // 确保纯告警，不泄漏原业务消息内容
+        expect(parsedBody.message).not.toContain('Secret Business Data');
+      } finally {
+        global.fetch = originalFetch;
+      }
+    });
   });
 });
 

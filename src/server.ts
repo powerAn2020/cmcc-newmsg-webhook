@@ -365,6 +365,70 @@ export async function createApp(config = loadConfig(), services: AppServices = {
     (request as any).audit = { authType: 'admin_session', credentialName: config.adminUsername };
   };
 
+  const upstreamFailTracker = new Map<number, { count: number; lastError: string; lastAlertAt: number }>();
+
+  async function checkAndTriggerGotifyAlert(upstream: Upstream, errorMessage: string) {
+    try {
+      const settings = await store.getSecuritySettings();
+      if (!settings.backupGotifyEnabled || !settings.backupGotifyUrl || !settings.backupGotifyToken) return;
+
+      const tracker = upstreamFailTracker.get(upstream.id) || { count: 0, lastError: '', lastAlertAt: 0 };
+      tracker.count += 1;
+      tracker.lastError = errorMessage;
+      const nowMs = Date.now();
+      const cooldownMs = 10 * 60_000;
+
+      if (tracker.count >= settings.backupGotifyThreshold && (tracker.lastAlertAt === 0 || nowMs - tracker.lastAlertAt >= cooldownMs)) {
+        tracker.lastAlertAt = nowMs;
+        upstreamFailTracker.set(upstream.id, tracker);
+
+        const gotifyBaseUrl = settings.backupGotifyUrl.replace(/\/+$/, '');
+        const url = `${gotifyBaseUrl}/message?token=${encodeURIComponent(settings.backupGotifyToken)}`;
+        const alertTitle = '【系统告警】上游通道消息发送失败告警';
+        const alertContent = `上游通道: ${upstream.name} (ID: ${upstream.id})\n连续失败次数: ${tracker.count} 次（已达阈值: ${settings.backupGotifyThreshold} 次）\n最新错误: ${errorMessage}\n告警时间: ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`;
+
+        try {
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              title: alertTitle,
+              message: alertContent,
+              priority: 8
+            })
+          });
+          const ok = res.ok;
+          await store.addHistory({
+            source: 'system',
+            upstreamId: upstream.id,
+            status: ok ? 'success' : 'failed',
+            title: alertTitle,
+            content: alertContent,
+            mediaType: null,
+            messageId: null,
+            error: ok ? null : `Gotify HTTP ${res.status}: ${await res.text().catch(() => '')}`
+          });
+        } catch (err) {
+          const errStr = err instanceof Error ? err.message : String(err);
+          await store.addHistory({
+            source: 'system',
+            upstreamId: upstream.id,
+            status: 'failed',
+            title: alertTitle,
+            content: alertContent,
+            mediaType: null,
+            messageId: null,
+            error: `Gotify 连接异常: ${errStr}`
+          });
+        }
+      } else {
+        upstreamFailTracker.set(upstream.id, tracker);
+      }
+    } catch (err) {
+      console.error('checkAndTriggerGotifyAlert error:', err);
+    }
+  }
+
   async function dispatch(
     source: CredentialKind | 'manual',
     target: DispatchTarget,
@@ -383,10 +447,12 @@ export async function createApp(config = loadConfig(), services: AppServices = {
           messageIds.push(messageId);
           await store.addHistory({ source, credentialId: target.credentialId, upstreamId: upstream.id, status: 'success', title, content: outgoing.content ?? outgoing.mediaUrl ?? null, mediaType: outgoing.mediaType ?? null, messageId, error: null });
         }
+        upstreamFailTracker.delete(upstream.id);
         return { upstreamId: upstream.id, upstreamName: upstream.name, ok: true as const, messageId: messageIds[0], messageIds };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         await store.addHistory({ source, credentialId: target.credentialId, upstreamId: upstream.id, status: 'failed', title, content: payload.content ?? payload.mediaUrl ?? null, mediaType: payload.mediaType ?? null, messageId: null, error: message });
+        await checkAndTriggerGotifyAlert(upstream, message);
         return { upstreamId: upstream.id, upstreamName: upstream.name, ok: false as const, error: message, messageIds };
       }
     }));
@@ -840,7 +906,11 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       rateLimitMsgDayMax: sec.rateLimitMsgDayMax,
       rateLimitIpMinMax: sec.rateLimitIpMinMax,
       rateLimitDuplicateWindowSec: sec.rateLimitDuplicateWindowSec,
-      notifyOnRateLimit: sec.notifyOnRateLimit
+      notifyOnRateLimit: sec.notifyOnRateLimit,
+      backupGotifyEnabled: sec.backupGotifyEnabled,
+      backupGotifyUrl: sec.backupGotifyUrl,
+      backupGotifyToken: sec.backupGotifyToken,
+      backupGotifyThreshold: sec.backupGotifyThreshold
     };
   });
 
@@ -874,6 +944,10 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       rateLimitIpMinMax?: number;
       rateLimitDuplicateWindowSec?: number;
       notifyOnRateLimit?: boolean;
+      backupGotifyEnabled?: boolean;
+      backupGotifyUrl?: string;
+      backupGotifyToken?: string;
+      backupGotifyThreshold?: number;
     };
   }>('/admin/api/settings', { preHandler: requireAdmin }, async (request, reply) => {
     const body = request.body ?? {};
@@ -1011,6 +1085,25 @@ export async function createApp(config = loadConfig(), services: AppServices = {
     if (body.notifyOnRateLimit !== undefined && typeof body.notifyOnRateLimit !== 'boolean') {
       return reply.badRequest('notifyOnRateLimit must be boolean');
     }
+    if (body.backupGotifyEnabled !== undefined && typeof body.backupGotifyEnabled !== 'boolean') {
+      return reply.badRequest('backupGotifyEnabled must be boolean');
+    }
+    if (body.backupGotifyUrl !== undefined) {
+      if (typeof body.backupGotifyUrl !== 'string') {
+        return reply.badRequest('backupGotifyUrl must be string');
+      }
+      if (body.backupGotifyUrl.trim() && !/^https?:\/\//i.test(body.backupGotifyUrl.trim())) {
+        return reply.badRequest('backupGotifyUrl must start with http:// or https://');
+      }
+    }
+    if (body.backupGotifyToken !== undefined && typeof body.backupGotifyToken !== 'string') {
+      return reply.badRequest('backupGotifyToken must be string');
+    }
+    if (body.backupGotifyThreshold !== undefined) {
+      if (!Number.isInteger(body.backupGotifyThreshold) || body.backupGotifyThreshold < 1) {
+        return reply.badRequest('backupGotifyThreshold must be a positive integer');
+      }
+    }
 
     const envUpdates: Record<string, string | number | boolean> = {};
 
@@ -1136,8 +1229,17 @@ export async function createApp(config = loadConfig(), services: AppServices = {
       rateLimitMsgDayMax: body.rateLimitMsgDayMax,
       rateLimitIpMinMax: body.rateLimitIpMinMax,
       rateLimitDuplicateWindowSec: body.rateLimitDuplicateWindowSec,
-      notifyOnRateLimit: body.notifyOnRateLimit
+      notifyOnRateLimit: body.notifyOnRateLimit,
+      backupGotifyEnabled: body.backupGotifyEnabled,
+      backupGotifyUrl: body.backupGotifyUrl !== undefined ? body.backupGotifyUrl.trim() : undefined,
+      backupGotifyToken: body.backupGotifyToken !== undefined ? body.backupGotifyToken.trim() : undefined,
+      backupGotifyThreshold: body.backupGotifyThreshold
     });
+    if (body.backupGotifyEnabled !== undefined) envUpdates.BACKUP_GOTIFY_ENABLED = body.backupGotifyEnabled;
+    if (body.backupGotifyUrl !== undefined) envUpdates.BACKUP_GOTIFY_URL = body.backupGotifyUrl.trim();
+    if (body.backupGotifyToken !== undefined) envUpdates.BACKUP_GOTIFY_TOKEN = body.backupGotifyToken.trim();
+    if (body.backupGotifyThreshold !== undefined) envUpdates.BACKUP_GOTIFY_THRESHOLD = body.backupGotifyThreshold;
+
     accessLogger.setFormat('json');
     if (body.accessLogRetentionDays !== undefined) {
       accessLogger.startCleanupTimer(body.accessLogRetentionDays);

@@ -634,6 +634,35 @@
               </div>
             </fieldset>
 
+            <fieldset
+              style="border: 1px solid var(--line); border-radius: 6px; padding: 20px; background: rgba(0,0,0,0.01);">
+              <legend style="font-weight: bold; padding: 0 10px; color: #126d68;">Gotify 备用告警通道设置</legend>
+              <div style="margin-bottom: 16px;">
+                <label class="checkbox-inline">
+                  <input type="checkbox" name="backupGotifyEnabled" />
+                  <span>启用上游发送失败 Gotify 备用告警（上游通道故障时推送告警通知）</span>
+                </label>
+              </div>
+              <div
+                style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px;">
+                <label style="grid-column: span 2;">
+                  <span>Gotify 服务端 URL</span>
+                  <input name="backupGotifyUrl" type="url" placeholder="例如：https://gotify.example.com" />
+                  <span class="help-text">外部 Gotify 推送服务器的基础地址</span>
+                </label>
+                <label>
+                  <span>Gotify App Token</span>
+                  <input name="backupGotifyToken" type="password" autocomplete="off" placeholder="Gotify Application Token" />
+                  <span class="help-text">用于推送消息的 App Token</span>
+                </label>
+                <label>
+                  <span>连续失败告警阈值 (次) <span class="required">*</span></span>
+                  <input name="backupGotifyThreshold" type="number" min="1" step="1" value="3" />
+                  <span class="help-text">同一上游通道连续发送失败达此次数时触发告警（默认：3 次）</span>
+                </label>
+              </div>
+            </fieldset>
+
             <div>
               <p id="settings-message" class="form-message" role="status"></p>
               <button class="button primary" type="submit" style="width: auto; padding: 10px 28px;">保存系统设置</button>

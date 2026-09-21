@@ -65,6 +65,10 @@ export interface AppConfig {
   rateLimitIpMinMax: number;
   rateLimitDuplicateWindowSec: number;
   notifyOnRateLimit: boolean;
+  backupGotifyEnabled: boolean;
+  backupGotifyUrl: string;
+  backupGotifyToken: string;
+  backupGotifyThreshold: number;
 }
 
 export function loadConfig(): AppConfig {
@@ -150,6 +154,10 @@ export function loadConfig(): AppConfig {
   const rateLimitIpMinMax = parseEnvInt(process.env.RATE_LIMIT_IP_MIN_MAX, 30);
   const rateLimitDuplicateWindowSec = parseEnvInt(process.env.RATE_LIMIT_DUPLICATE_WINDOW_SEC, 300);
   const notifyOnRateLimit = process.env.NOTIFY_ON_RATE_LIMIT !== 'false';
+  const backupGotifyEnabled = process.env.BACKUP_GOTIFY_ENABLED === 'true';
+  const backupGotifyUrl = process.env.BACKUP_GOTIFY_URL?.trim() || '';
+  const backupGotifyToken = process.env.BACKUP_GOTIFY_TOKEN?.trim() || '';
+  const backupGotifyThreshold = parseEnvInt(process.env.BACKUP_GOTIFY_THRESHOLD, 3);
 
   const rawDbType = (process.env.DB_TYPE || process.env.DATABASE_TYPE || 'sqlite').toLowerCase();
   const databaseType: DatabaseType = rawDbType === 'postgres' || rawDbType === 'postgresql' || rawDbType === 'pg'
@@ -211,7 +219,11 @@ export function loadConfig(): AppConfig {
     rateLimitMsgDayMax,
     rateLimitIpMinMax,
     rateLimitDuplicateWindowSec,
-    notifyOnRateLimit
+    notifyOnRateLimit,
+    backupGotifyEnabled,
+    backupGotifyUrl,
+    backupGotifyToken,
+    backupGotifyThreshold
   };
 }
 

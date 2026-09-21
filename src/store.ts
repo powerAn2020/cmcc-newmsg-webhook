@@ -24,6 +24,10 @@ export interface SecurityAlertSettings {
   rateLimitIpMinMax: number;
   rateLimitDuplicateWindowSec: number;
   notifyOnRateLimit: boolean;
+  backupGotifyEnabled: boolean;
+  backupGotifyUrl: string;
+  backupGotifyToken: string;
+  backupGotifyThreshold: number;
 }
 
 type UpstreamRow = { id: number; name: string; api_key: string; created_at: string; updated_at: string };
@@ -1268,7 +1272,11 @@ async function buildSecuritySettings(getter: (key: string) => Promise<string>): 
     rateLimitMsgDayMax: Math.max(0, await parseNum('rateLimitMsgDayMax', await parseNum('rateLimitPhoneDayMax', 0))),
     rateLimitIpMinMax: Math.max(0, await parseNum('rateLimitIpMinMax', 30)),
     rateLimitDuplicateWindowSec: Math.max(0, await parseNum('rateLimitDuplicateWindowSec', 300)),
-    notifyOnRateLimit: (await getter('notifyOnRateLimit')) !== 'false'
+    notifyOnRateLimit: (await getter('notifyOnRateLimit')) !== 'false',
+    backupGotifyEnabled: (await getter('backupGotifyEnabled')) !== '' ? (await getter('backupGotifyEnabled')) === 'true' : process.env.BACKUP_GOTIFY_ENABLED === 'true',
+    backupGotifyUrl: (await getter('backupGotifyUrl')) || (process.env.BACKUP_GOTIFY_URL?.trim() ?? ''),
+    backupGotifyToken: (await getter('backupGotifyToken')) || (process.env.BACKUP_GOTIFY_TOKEN?.trim() ?? ''),
+    backupGotifyThreshold: Math.max(1, await parseNum('backupGotifyThreshold', Number(process.env.BACKUP_GOTIFY_THRESHOLD) || 3))
   };
 }
 
@@ -1292,6 +1300,10 @@ async function applySecuritySettingsUpdate(
   if (settings.rateLimitIpMinMax !== undefined) await setter('rateLimitIpMinMax', String(settings.rateLimitIpMinMax));
   if (settings.rateLimitDuplicateWindowSec !== undefined) await setter('rateLimitDuplicateWindowSec', String(settings.rateLimitDuplicateWindowSec));
   if (settings.notifyOnRateLimit !== undefined) await setter('notifyOnRateLimit', String(settings.notifyOnRateLimit));
+  if (settings.backupGotifyEnabled !== undefined) await setter('backupGotifyEnabled', String(settings.backupGotifyEnabled));
+  if (settings.backupGotifyUrl !== undefined) await setter('backupGotifyUrl', settings.backupGotifyUrl.trim());
+  if (settings.backupGotifyToken !== undefined) await setter('backupGotifyToken', settings.backupGotifyToken.trim());
+  if (settings.backupGotifyThreshold !== undefined) await setter('backupGotifyThreshold', String(settings.backupGotifyThreshold));
 }
 
 export { SqliteStore as Store };
